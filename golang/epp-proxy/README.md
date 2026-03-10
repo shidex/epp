@@ -54,12 +54,12 @@ Berikut fungsi dari masing-masing variabel rate limit (dengan baseline pada `env
 - `RATELIMIT_CHANNEL_RULES=15/second,900/minute`
   - Limit per koneksi TCP aktif (channel).
   - Mencegah satu socket menyedot seluruh kapasitas service.
-- `RATELIMIT_WRITE_RULES=5/second,300/minute`
+- `RATELIMIT_WRITE_RULES=40/second,2400/minute`
   - Limit global seluruh transaksi write lintas IP dan username.
-  - Menjaga operasi mutasi (create/update/delete/transfer) tetap konservatif.
-- `RATELIMIT_READ_RULES=20/second,1200/minute`
+  - Dibuat agregat (lebih besar dari limit per IP/per client) agar cukup untuk kombinasi banyak username aktif secara bersamaan.
+- `RATELIMIT_READ_RULES=150/second,9000/minute`
   - Limit global seluruh transaksi read lintas IP dan username.
-  - Menjaga query/read tetap tinggi tetapi tetap terkendali.
+  - Dibuat agregat (lebih besar dari limit per IP/per client) agar tidak memotong trafik saat banyak username membaca paralel.
 - `RATELIMIT_WRITE_IP_RULES=5/second,300/minute`
   - Limit write khusus per IP.
   - Sesuai kondisi real: transaksi write per IP dibatasi 5/detik.
@@ -74,8 +74,9 @@ Berikut fungsi dari masing-masing variabel rate limit (dengan baseline pada `env
   - Sesuai kondisi real: transaksi read per username dibatasi 20/detik.
 
 Catatan balancing yang dipakai:
-- Read dibuat ±4x lebih longgar daripada write (20 vs 5 per detik) karena read umumnya lebih ringan dan dominan volumenya.
-- Limit global (`RATELIMIT_*_RULES`) diset sejalan dengan limit spesifik IP/client agar proteksi berlapis tetap konsisten, bukan saling bertabrakan.
+- Pada limit spesifik IP/client, read dibuat ±4x lebih longgar daripada write (20 vs 5 per detik) karena read umumnya lebih ringan dan dominan volumenya.
+- Limit global (`RATELIMIT_*_RULES`) sebaiknya lebih besar dari limit spesifik IP/client karena berfungsi sebagai pagu total gabungan banyak username/IP.
+- Contoh asumsi kapasitas: 5 username peak + 10 username kecil/sedang menghasilkan kebutuhan kira-kira write 35-40 rps dan read 130-150 rps, sehingga baseline global dipasang di 40 rps (write) dan 150 rps (read).
 - Window menit dipakai sebagai guardrail trafik berkelanjutan (bukan hanya burst per detik).
 
 ### Variabel tambahan (operasional)
