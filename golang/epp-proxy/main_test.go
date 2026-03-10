@@ -83,21 +83,73 @@ func TestRateLimiterAllow(t *testing.T) {
 	cfg := Config{
 		IPRateLimitRules: []rateLimitRule{{limit: 2, window: 50 * time.Millisecond}},
 		ChannelRateLimit: []rateLimitRule{{limit: 2, window: 50 * time.Millisecond}},
+		WriteRateLimit:   []rateLimitRule{{limit: 1, window: 50 * time.Millisecond}},
+		ReadRateLimit:    []rateLimitRule{{limit: 3, window: 50 * time.Millisecond}},
 	}
 
-	if !limiter.Allow("1.1.1.1", "", "chan-1", cfg) {
+	if !limiter.Allow("1.1.1.1", "", "chan-1", "read", cfg) {
 		t.Fatal("first request should pass")
 	}
-	if !limiter.Allow("1.1.1.1", "", "chan-1", cfg) {
+	if !limiter.Allow("1.1.1.1", "", "chan-1", "read", cfg) {
 		t.Fatal("second request should pass")
 	}
-	if limiter.Allow("1.1.1.1", "", "chan-1", cfg) {
+	if limiter.Allow("1.1.1.1", "", "chan-1", "read", cfg) {
 		t.Fatal("third request should be blocked")
 	}
 
 	time.Sleep(60 * time.Millisecond)
-	if !limiter.Allow("1.1.1.1", "", "chan-1", cfg) {
+	if !limiter.Allow("1.1.1.1", "", "chan-1", "read", cfg) {
 		t.Fatal("request should pass after window reset")
+	}
+}
+
+func TestRateLimiterAllowWriteAndReadBuckets(t *testing.T) {
+	limiter := newRateLimiter(Config{})
+	cfg := Config{
+		WriteRateLimit: []rateLimitRule{{limit: 1, window: time.Second}},
+		ReadRateLimit:  []rateLimitRule{{limit: 2, window: time.Second}},
+	}
+
+	if !limiter.Allow("1.1.1.1", "registrar1", "chan-1", "write", cfg) {
+		t.Fatal("first write should pass")
+	}
+	if limiter.Allow("1.1.1.1", "registrar1", "chan-1", "write", cfg) {
+		t.Fatal("second write should be blocked")
+	}
+
+	if !limiter.Allow("1.1.1.1", "registrar1", "chan-1", "read", cfg) {
+		t.Fatal("first read should pass")
+	}
+	if !limiter.Allow("1.1.1.1", "registrar1", "chan-1", "read", cfg) {
+		t.Fatal("second read should pass")
+	}
+	if limiter.Allow("1.1.1.1", "registrar1", "chan-1", "read", cfg) {
+		t.Fatal("third read should be blocked")
+	}
+}
+
+func TestClassifyCommandType(t *testing.T) {
+	tests := []struct {
+		name   string
+		xml    string
+		expect string
+	}{
+		{name: "login", xml: `<epp><command><login/></command></epp>`, expect: "read"},
+		{name: "logout", xml: `<epp><command><logout/></command></epp>`, expect: "read"},
+		{name: "domain create", xml: `<epp><command><create><domain:create/></create></command></epp>`, expect: "write"},
+		{name: "contact update", xml: `<epp><command><update><contact:update/></update></command></epp>`, expect: "write"},
+		{name: "host check", xml: `<epp><command><check><host:check/></check></command></epp>`, expect: "read"},
+		{name: "domain info", xml: `<epp><command><info><domain:info/></info></command></epp>`, expect: "read"},
+		{name: "poll", xml: `<epp><command><poll op="req"/></command></epp>`, expect: ""},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := classifyCommandType([]byte(tc.xml))
+			if got != tc.expect {
+				t.Fatalf("expected %q got %q", tc.expect, got)
+			}
+		})
 	}
 }
 
