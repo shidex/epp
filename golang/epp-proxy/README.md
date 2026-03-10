@@ -40,6 +40,44 @@ Contoh tersedia di `env.example`.
 - `ratelimit.read.client.rules` -> `RATELIMIT_READ_CLIENT_RULES`
 - `ratelimit.write.client.rules` -> `RATELIMIT_WRITE_CLIENT_RULES`
 
+
+### Penjelasan fungsi setiap setting rate limit
+
+Berikut fungsi dari masing-masing variabel rate limit (dengan baseline pada `env.example`):
+
+- `RATELIMIT_IP_RULES=25/second,1500/minute`
+  - Limit global semua transaksi per source IP (read + write).
+  - Berfungsi sebagai pagar pertama untuk membatasi burst dari satu IP.
+- `RATELIMIT_CLIENT_RULES=25/second,1500/minute`
+  - Limit global semua transaksi per username/client ID setelah login.
+  - Menjaga fairness antar registrar username walau berada di IP yang sama.
+- `RATELIMIT_CHANNEL_RULES=15/second,900/minute`
+  - Limit per koneksi TCP aktif (channel).
+  - Mencegah satu socket menyedot seluruh kapasitas service.
+- `RATELIMIT_WRITE_RULES=5/second,300/minute`
+  - Limit global seluruh transaksi write lintas IP dan username.
+  - Menjaga operasi mutasi (create/update/delete/transfer) tetap konservatif.
+- `RATELIMIT_READ_RULES=20/second,1200/minute`
+  - Limit global seluruh transaksi read lintas IP dan username.
+  - Menjaga query/read tetap tinggi tetapi tetap terkendali.
+- `RATELIMIT_WRITE_IP_RULES=5/second,300/minute`
+  - Limit write khusus per IP.
+  - Sesuai kondisi real: transaksi write per IP dibatasi 5/detik.
+- `RATELIMIT_WRITE_CLIENT_RULES=5/second,300/minute`
+  - Limit write khusus per username/client.
+  - Sesuai kondisi real: transaksi write per username dibatasi 5/detik.
+- `RATELIMIT_READ_IP_RULES=20/second,1200/minute`
+  - Limit read khusus per IP.
+  - Sesuai kondisi real: transaksi read per IP dibatasi 20/detik.
+- `RATELIMIT_READ_CLIENT_RULES=20/second,1200/minute`
+  - Limit read khusus per username/client.
+  - Sesuai kondisi real: transaksi read per username dibatasi 20/detik.
+
+Catatan balancing yang dipakai:
+- Read dibuat ±4x lebih longgar daripada write (20 vs 5 per detik) karena read umumnya lebih ringan dan dominan volumenya.
+- Limit global (`RATELIMIT_*_RULES`) diset sejalan dengan limit spesifik IP/client agar proteksi berlapis tetap konsisten, bukan saling bertabrakan.
+- Window menit dipakai sebagai guardrail trafik berkelanjutan (bukan hanya burst per detik).
+
 ### Variabel tambahan (operasional)
 - `EPP_CONNECT_TIMEOUT` (default `5s`) timeout call backend.
 - `EPP_BACKEND_TIMEOUT` (default `15s`) timeout total request HTTP ke backend.
