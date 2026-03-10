@@ -3,8 +3,14 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"crypto/rand"
+	"crypto/rsa"
 	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/pem"
 	"encoding/binary"
+	"math/big"
 	"log"
 	"net"
 	"net/http"
@@ -340,5 +346,211 @@ func TestNewBackendHTTPClient(t *testing.T) {
 	}
 	if transport.TLSHandshakeTimeout != 3*time.Second {
 		t.Fatalf("unexpected TLSHandshakeTimeout: %v", transport.TLSHandshakeTimeout)
+	}
+}
+
+
+func TestBuildListenerTLSSkipsCAWhenClientAuthNone(t *testing.T) {
+	rootKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("generate root key failed: %v", err)
+	}
+	rootTemplate := &x509.Certificate{
+		SerialNumber: big.NewInt(11),
+		Subject:      pkix.Name{CommonName: "root-ca"},
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(24 * time.Hour),
+		KeyUsage:     x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
+		IsCA:         true,
+		BasicConstraintsValid: true,
+	}
+	rootDER, err := x509.CreateCertificate(rand.Reader, rootTemplate, rootTemplate, &rootKey.PublicKey, rootKey)
+	if err != nil {
+		t.Fatalf("create root cert failed: %v", err)
+	}
+	rootCert, err := x509.ParseCertificate(rootDER)
+	if err != nil {
+		t.Fatalf("parse root cert failed: %v", err)
+	}
+
+	leafKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("generate leaf key failed: %v", err)
+	}
+	leafTemplate := &x509.Certificate{
+		SerialNumber: big.NewInt(12),
+		Subject:      pkix.Name{CommonName: "127.0.0.1"},
+		DNSNames:     []string{"localhost"},
+		IPAddresses:  []net.IP{net.ParseIP("127.0.0.1")},
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(24 * time.Hour),
+		KeyUsage:     x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+	}
+	leafDER, err := x509.CreateCertificate(rand.Reader, leafTemplate, rootCert, &leafKey.PublicKey, rootKey)
+	if err != nil {
+		t.Fatalf("create leaf cert failed: %v", err)
+	}
+
+	dir := t.TempDir()
+	certPath := dir + "/server.pem"
+	keyPath := dir + "/server.key"
+
+	if err := os.WriteFile(certPath, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: leafDER}), 0o644); err != nil {
+		t.Fatalf("write cert failed: %v", err)
+	}
+	if err := os.WriteFile(keyPath, pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(leafKey)}), 0o600); err != nil {
+		t.Fatalf("write key failed: %v", err)
+	}
+
+	ln, err := buildListener(Config{
+		ListenAddr:    "127.0.0.1:0",
+		FrontendTLS:   true,
+		FrontendCert:  certPath,
+		FrontendKey:   keyPath,
+		FrontendCA:    dir + "/missing-ca.pem",
+		TLSClientAuth: tls.NoClientCert,
+	})
+	if err != nil {
+		t.Fatalf("build TLS listener should ignore CA when client auth NONE: %v", err)
+	}
+	defer ln.Close()
+}
+
+func TestBuildListenerTLSWithFullChainCertificate(t *testing.T) {
+	rootKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("generate root key failed: %v", err)
+	}
+	rootTemplate := &x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		Subject:      pkix.Name{CommonName: "root-ca"},
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(24 * time.Hour),
+		KeyUsage:     x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
+		IsCA:         true,
+		BasicConstraintsValid: true,
+	}
+	rootDER, err := x509.CreateCertificate(rand.Reader, rootTemplate, rootTemplate, &rootKey.PublicKey, rootKey)
+	if err != nil {
+		t.Fatalf("create root cert failed: %v", err)
+	}
+	rootCert, err := x509.ParseCertificate(rootDER)
+	if err != nil {
+		t.Fatalf("parse root cert failed: %v", err)
+	}
+
+	intermediateKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("generate intermediate key failed: %v", err)
+	}
+	intermediateTemplate := &x509.Certificate{
+		SerialNumber: big.NewInt(2),
+		Subject:      pkix.Name{CommonName: "intermediate-ca"},
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(24 * time.Hour),
+		KeyUsage:     x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
+		IsCA:         true,
+		BasicConstraintsValid: true,
+	}
+	intermediateDER, err := x509.CreateCertificate(rand.Reader, intermediateTemplate, rootCert, &intermediateKey.PublicKey, rootKey)
+	if err != nil {
+		t.Fatalf("create intermediate cert failed: %v", err)
+	}
+	intermediateCert, err := x509.ParseCertificate(intermediateDER)
+	if err != nil {
+		t.Fatalf("parse intermediate cert failed: %v", err)
+	}
+
+	leafKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("generate leaf key failed: %v", err)
+	}
+	leafTemplate := &x509.Certificate{
+		SerialNumber: big.NewInt(3),
+		Subject:      pkix.Name{CommonName: "127.0.0.1"},
+		DNSNames:     []string{"localhost"},
+		IPAddresses:  []net.IP{net.ParseIP("127.0.0.1")},
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(24 * time.Hour),
+		KeyUsage:     x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+	}
+	leafDER, err := x509.CreateCertificate(rand.Reader, leafTemplate, intermediateCert, &leafKey.PublicKey, intermediateKey)
+	if err != nil {
+		t.Fatalf("create leaf cert failed: %v", err)
+	}
+
+	dir := t.TempDir()
+	certPath := dir + "/server-fullchain.pem"
+	keyPath := dir + "/server.key"
+	caPath := dir + "/client-ca.pem"
+
+	certPEM := append(
+		pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: leafDER}),
+		pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: intermediateDER})...,
+	)
+	if err := os.WriteFile(certPath, certPEM, 0o644); err != nil {
+		t.Fatalf("write fullchain cert failed: %v", err)
+	}
+	if err := os.WriteFile(keyPath, pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(leafKey)}), 0o600); err != nil {
+		t.Fatalf("write private key failed: %v", err)
+	}
+	if err := os.WriteFile(caPath, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: rootDER}), 0o644); err != nil {
+		t.Fatalf("write root ca failed: %v", err)
+	}
+
+	ln, err := buildListener(Config{
+		ListenAddr:    "127.0.0.1:0",
+		FrontendTLS:   true,
+		FrontendCert:  certPath,
+		FrontendKey:   keyPath,
+		FrontendCA:    caPath,
+		TLSClientAuth: tls.NoClientCert,
+	})
+	if err != nil {
+		t.Fatalf("build TLS listener failed: %v", err)
+	}
+	defer ln.Close()
+
+	errCh := make(chan error, 1)
+	go func() {
+		conn, acceptErr := ln.Accept()
+		if acceptErr != nil {
+			errCh <- acceptErr
+			return
+		}
+		tlsConn, ok := conn.(*tls.Conn)
+		if !ok {
+			_ = conn.Close()
+			errCh <- nil
+			return
+		}
+		handshakeErr := tlsConn.Handshake()
+		_ = tlsConn.Close()
+		errCh <- handshakeErr
+	}()
+
+	rootPool := x509.NewCertPool()
+	if !rootPool.AppendCertsFromPEM(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: rootDER})) {
+		t.Fatal("failed appending root cert")
+	}
+
+	clientConn, err := tls.Dial("tcp", ln.Addr().String(), &tls.Config{RootCAs: rootPool, ServerName: "localhost", MinVersion: tls.VersionTLS12})
+	if err != nil {
+		t.Fatalf("TLS dial to listener failed: %v", err)
+	}
+	state := clientConn.ConnectionState()
+	_ = clientConn.Close()
+
+	if len(state.PeerCertificates) < 2 {
+		t.Fatalf("expected fullchain sent by server, got %d certificates", len(state.PeerCertificates))
+	}
+	if state.PeerCertificates[1].Subject.CommonName != "intermediate-ca" {
+		t.Fatalf("expected intermediate in peer chain, got %q", state.PeerCertificates[1].Subject.CommonName)
+	}
+
+	if acceptErr := <-errCh; acceptErr != nil {
+		t.Fatalf("accept failed: %v", acceptErr)
 	}
 }
