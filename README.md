@@ -142,6 +142,21 @@ pm2 status
 pm2 logs go-epp-proxy
 ```
 
+5. Aktifkan rotasi log harian (sekali setup di host):
+```bash
+pm2 install pm2-logrotate
+pm2 set pm2-logrotate:rotateInterval '0 0 * * *'
+pm2 set pm2-logrotate:dateFormat 'YYYY-MM-DD_HH-mm-ss'
+pm2 set pm2-logrotate:compress true
+pm2 set pm2-logrotate:retain 30
+```
+
+Penjelasan singkat:
+- `rotateInterval '0 0 * * *'` = rotasi otomatis setiap hari jam 00:00.
+- `retain 30` = simpan 30 file hasil rotasi terakhir.
+- `compress true` = file log lama dikompres agar hemat disk.
+- Cek konfigurasi aktif dengan `pm2 conf pm2-logrotate`.
+
 `ecosystem.config.js` sudah disediakan dan default memakai `EPP_LOG_FORMAT=json`.
 
 ## Catatan hardening DDoS
