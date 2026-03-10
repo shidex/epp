@@ -1,0 +1,12 @@
+package session;
+
+public enum SessionState {
+    WAITING_FOR_CLIENT,
+    CONNECTED,
+    SENT_GREETING,
+    WAITING_FOR_AUTH,
+    AUTHENTICATED,
+    PROCESSING_COMMAND,
+    END_SESSION,
+    TIMEOUT
+}
