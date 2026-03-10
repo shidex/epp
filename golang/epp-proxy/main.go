@@ -58,6 +58,8 @@ type Config struct {
 	BackendMaxConnsPerHost     int
 	BackendResponseMaxBytes    int64
 	LogFormat                  string
+	PremiumDomainFile          string
+	PremiumDomains             map[string]struct{}
 }
 
 type rateLimiter struct {
@@ -187,6 +189,7 @@ func loadConfig() Config {
 	backendMaxConnsPerHost := flag.Int("backend-max-conns-per-host", intWithFallback(envOr("EPP_BACKEND_MAX_CONNS_PER_HOST", "0"), 0), "maximum total backend HTTP connections per host; 0 means unlimited")
 	backendResponseMaxBytes := flag.Int64("backend-response-max-bytes", int64(intWithFallback(envOr("EPP_BACKEND_RESPONSE_MAX_BYTES", "1048576"), 1048576)), "maximum response body bytes read from backend")
 	logFormat := flag.String("log-format", strings.ToLower(envOr("EPP_LOG_FORMAT", "json")), "log format: json or text")
+	premiumDomainFile := flag.String("premium-domain-file", envOr("EPP_PREMIUM_DOMAIN_FILE", "domainpremium.txt"), "file path containing premium domains to block from check forwarding")
 	flag.Parse()
 
 	return Config{
@@ -222,6 +225,8 @@ func loadConfig() Config {
 		BackendMaxConnsPerHost:     *backendMaxConnsPerHost,
 		BackendResponseMaxBytes:    *backendResponseMaxBytes,
 		LogFormat:                  *logFormat,
+		PremiumDomainFile:          *premiumDomainFile,
+		PremiumDomains:             loadPremiumDomains(*premiumDomainFile),
 	}
 }
 
@@ -348,6 +353,16 @@ func handleConn(cfg Config, logger *log.Logger, limiter *rateLimiter, httpClient
 				_ = client.SetWriteDeadline(time.Now().Add(cfg.WriteTimeout))
 				_ = writeEPPPayload(client, []byte(buildErrorResponse("Missing session token")))
 				return
+			}
+
+			if blockedDomain, ok := premiumDomainFromCheck(payload, cfg.PremiumDomains); ok {
+				logEvent(logger, cfg.LogFormat, "info", "premium_domain_blocked", map[string]any{"channel": clientID, "username": username, "domain": blockedDomain})
+				_ = client.SetWriteDeadline(time.Now().Add(cfg.WriteTimeout))
+				if err = writeEPPPayload(client, []byte(buildDomainUnavailableResponse(extractClTRID(payload)))); err != nil {
+					logEvent(logger, cfg.LogFormat, "error", "write_premium_domain_response_failed", map[string]any{"channel": clientID, "error": err.Error()})
+					return
+				}
+				continue
 			}
 
 			respBody, callErr := postEPPCommand(httpClient, cfg.CommandBackendURL, token, payload, cfg.BackendResponseMaxBytes)
@@ -544,6 +559,56 @@ func classifyCommandType(payload []byte) string {
 	return ""
 }
 
+func loadPremiumDomains(path string) map[string]struct{} {
+	set := make(map[string]struct{})
+	file, err := os.Open(path)
+	if err != nil {
+		return set
+	}
+	defer file.Close()
+
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		set[strings.ToLower(line)] = struct{}{}
+	}
+
+	return set
+}
+
+func premiumDomainFromCheck(payload []byte, premiumDomains map[string]struct{}) (string, bool) {
+	if len(premiumDomains) == 0 {
+		return "", false
+	}
+	xmlBody := strings.ToLower(string(payload))
+	if !strings.Contains(xmlBody, "<check") || !strings.Contains(xmlBody, "domain:check") {
+		return "", false
+	}
+
+	decoder := xml.NewDecoder(bytes.NewReader(payload))
+	for {
+		token, err := decoder.Token()
+		if err != nil {
+			return "", false
+		}
+		start, ok := token.(xml.StartElement)
+		if !ok || !strings.EqualFold(start.Name.Local, "name") {
+			continue
+		}
+		var domainName string
+		if err = decoder.DecodeElement(&domainName, &start); err != nil {
+			continue
+		}
+		normalized := strings.ToLower(strings.TrimSpace(domainName))
+		if _, exists := premiumDomains[normalized]; exists {
+			return normalized, true
+		}
+	}
+}
+
 func fallbackKey(username, ip string) string {
 	if username != "" {
 		return username
@@ -659,6 +724,10 @@ func buildAuthFailResponse() string {
 
 func buildErrorResponse(message string) string {
 	return `<?xml version="1.0" encoding="UTF-8" standalone="no"?><epp xmlns="urn:ietf:params:xml:ns:epp-1.0"><response><result code="2004"><msg>` + escapeXML(message) + `</msg></result></response></epp>`
+}
+
+func buildDomainUnavailableResponse(clTRID string) string {
+	return `<?xml version="1.0" encoding="UTF-8" standalone="no"?><epp xmlns="urn:ietf:params:xml:ns:epp-1.0"><response><result code="2302"><msg>Domain tidak available</msg></result><trID><clTRID>` + escapeXML(clTRID) + `</clTRID><svTRID>go-proxy</svTRID></trID></response></epp>`
 }
 
 func buildLogoutResponse(clTRID string) string {

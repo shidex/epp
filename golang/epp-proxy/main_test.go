@@ -353,6 +353,51 @@ func TestBuildResponsesEscapeXML(t *testing.T) {
 	}
 }
 
+func TestLoadPremiumDomains(t *testing.T) {
+	dir := t.TempDir()
+	path := dir + "/domainpremium.txt"
+	content := "# premium list\nPremium.ID\n\nvip.id\n"
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatalf("failed writing premium domain file: %v", err)
+	}
+
+	set := loadPremiumDomains(path)
+	if _, ok := set["premium.id"]; !ok {
+		t.Fatal("expected premium.id in set")
+	}
+	if _, ok := set["vip.id"]; !ok {
+		t.Fatal("expected vip.id in set")
+	}
+}
+
+func TestPremiumDomainFromCheck(t *testing.T) {
+	premium := map[string]struct{}{"premium.id": {}}
+	xmlPayload := []byte(`<?xml version="1.0" encoding="UTF-8"?><epp xmlns="urn:ietf:params:xml:ns:epp-1.0"><command><check><domain:check xmlns:domain="urn:ietf:params:xml:ns:domain-1.0"><domain:name>premium.id</domain:name></domain:check></check><clTRID>trid-1</clTRID></command></epp>`)
+
+	domain, blocked := premiumDomainFromCheck(xmlPayload, premium)
+	if !blocked {
+		t.Fatal("expected domain to be blocked")
+	}
+	if domain != "premium.id" {
+		t.Fatalf("expected blocked domain premium.id got %q", domain)
+	}
+
+	nonPremium := []byte(`<?xml version="1.0" encoding="UTF-8"?><epp xmlns="urn:ietf:params:xml:ns:epp-1.0"><command><check><domain:check xmlns:domain="urn:ietf:params:xml:ns:domain-1.0"><domain:name>normal.id</domain:name></domain:check></check><clTRID>trid-2</clTRID></command></epp>`)
+	if _, ok := premiumDomainFromCheck(nonPremium, premium); ok {
+		t.Fatal("expected non-premium domain to pass")
+	}
+}
+
+func TestBuildDomainUnavailableResponse(t *testing.T) {
+	resp := buildDomainUnavailableResponse("abc-123")
+	if !bytes.Contains([]byte(resp), []byte(`code="2302"`)) {
+		t.Fatalf("expected result code 2302 in response: %s", resp)
+	}
+	if !bytes.Contains([]byte(resp), []byte("Domain tidak available")) {
+		t.Fatalf("expected unavailable message in response: %s", resp)
+	}
+}
+
 func TestReadBodyWithLimit(t *testing.T) {
 	got, err := readBodyWithLimit(bytes.NewBufferString("abc"), 3)
 	if err != nil {
