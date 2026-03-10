@@ -1,50 +1,55 @@
-# Go EPP TCP Forwarder
+# Go EPP HTTP Bridge
 
-Service ini adalah versi Go yang membuka port `700` (default), menerima koneksi EPP, lalu melakukan forwarding byte-stream ke backend.
+Service Go ini membuka port EPP (default `:700`), menerima frame EPP dari registrar, lalu memprosesnya ke backend HTTP yang sama seperti implementasi Java:
+
+- Auth login -> `authRegistrar` (HTTP POST JSON)
+- Command EPP -> `processepp` (HTTP POST XML + header `authentication`)
+
+Dengan alur ini backend Java existing tidak perlu diubah.
 
 ## Fitur
-- Default listen di `:700`
-- Forward raw TCP (cocok untuk frame EPP 4-byte prefix maupun delimiter XML)
-- Opsi TLS di sisi frontend (listener)
-- Opsi TLS di sisi backend (upstream)
-- Graceful shutdown via SIGINT/SIGTERM
-- Built-in EPP command rate limiting (drop before forwarding to backend)
+- Listener EPP TCP/TLS
+- Kirim EPP greeting saat koneksi terbuka
+- Login flow mengikuti Java (auth backend + ambil `eppSessionToken`)
+- Forward command ke backend HTTP dengan header `authentication`
+- Response EPP login/logout/error dasar
+- Rate limiting per IP/username
 
 ## Menjalankan
-Jalankan dari folder `golang/epp-proxy`:
+Dari folder `golang/epp-proxy`:
+
 ```bash
 cd golang/epp-proxy
 go run . \
   -listen :700 \
-  -backend 127.0.0.1:1700
+  -auth-url http://localhost:8080/PANDI-REGISTRAR-0.1/authRegistrar/ \
+  -command-url http://localhost:8080/PANDI-CORE-0.1/processepp/
 ```
 
 Atau via environment variable:
 
 ```bash
-cd golang/epp-proxy && EPP_LISTEN_ADDR=:700 EPP_BACKEND_ADDR=10.10.10.10:7000 go run .
+cd golang/epp-proxy && \
+EPP_LISTEN_ADDR=:700 \
+EPP_AUTH_URL=http://localhost:8080/PANDI-REGISTRAR-0.1/authRegistrar/ \
+EPP_COMMAND_URL=http://localhost:8080/PANDI-CORE-0.1/processepp/ \
+go run .
 ```
 
 ## Opsi konfigurasi
 - `-listen` / `EPP_LISTEN_ADDR` (default `:700`)
-- `-backend` / `EPP_BACKEND_ADDR` (default `127.0.0.1:1700`)
+- `-auth-url` / `EPP_AUTH_URL` (default `http://localhost:8080/PANDI-REGISTRAR-0.1/authRegistrar/`)
+- `-command-url` / `EPP_COMMAND_URL` (default `http://localhost:8080/PANDI-CORE-0.1/processepp/`)
 - `-connect-timeout` / `EPP_CONNECT_TIMEOUT` (default `5s`)
 - `-idle-timeout` / `EPP_IDLE_TIMEOUT` (default `10m`)
 - `-frontend-tls` / `EPP_FRONTEND_TLS` (default `false`)
 - `-frontend-cert` / `EPP_FRONTEND_CERT` (default `certs/server.crt`)
 - `-frontend-key` / `EPP_FRONTEND_KEY` (default `certs/server.key`)
-- `-backend-tls` / `EPP_BACKEND_TLS` (default `false`)
-- `-backend-insecure` / `EPP_BACKEND_INSECURE` (default `false`)
 - `-rate-limit-max` / `EPP_RATE_LIMIT_MAX` (default `10`)
 - `-rate-limit-window` / `EPP_RATE_LIMIT_WINDOW` (default `1m`)
 - `-rate-limit-by` / `EPP_RATE_LIMIT_BY` (default `ip_or_username`, opsi: `ip`, `username`, `ip_or_username`)
 
 ## Build binary
 ```bash
-go build -o epp-forwarder .
+go build -o epp-http-bridge .
 ```
-
-## Perilaku rate limit
-- Setiap frame perintah EPP dari client dihitung pada window yang dikonfigurasi.
-- Jika melebihi limit, proxy **tidak** meneruskan perintah ke backend dan langsung merespon EPP error code `2502` dengan pesan limit exceeded.
-- Untuk mode `username`, key diambil dari `<clID>` pada command login; jika belum ada, fallback ke IP client.

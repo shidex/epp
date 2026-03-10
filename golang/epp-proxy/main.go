@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/binary"
+	"encoding/json"
 	"encoding/xml"
 	"errors"
 	"flag"
@@ -13,6 +14,7 @@ import (
 	"io"
 	"log"
 	"net"
+	"net/http"
 	"os"
 	"os/signal"
 	"strconv"
@@ -23,18 +25,17 @@ import (
 )
 
 type Config struct {
-	ListenAddr      string
-	BackendAddr     string
-	ConnectTimeout  time.Duration
-	IdleTimeout     time.Duration
-	FrontendTLS     bool
-	FrontendCert    string
-	FrontendKey     string
-	BackendTLS      bool
-	BackendInsecure bool
-	RateLimitMax    int
-	RateLimitWindow time.Duration
-	RateLimitBy     string
+	ListenAddr        string
+	ConnectTimeout    time.Duration
+	IdleTimeout       time.Duration
+	FrontendTLS       bool
+	FrontendCert      string
+	FrontendKey       string
+	AuthBackendURL    string
+	CommandBackendURL string
+	RateLimitMax      int
+	RateLimitWindow   time.Duration
+	RateLimitBy       string
 }
 
 type rateLimiter struct {
@@ -48,6 +49,27 @@ type rateLimiter struct {
 type bucket struct {
 	windowStart time.Time
 	count       int
+}
+
+type authRequest struct {
+	EppUsername           string `json:"eppUsername,omitempty"`
+	EppPassword           string `json:"eppPassword,omitempty"`
+	EppNewPassword        string `json:"eppNewPassword,omitempty"`
+	ServerCertificateHash string `json:"serverCertificateHash,omitempty"`
+	IPAddress             string `json:"ipAddress,omitempty"`
+}
+
+type authResponse struct {
+	ResponseCode    string `json:"responseCode"`
+	ResponseDesc    string `json:"responseDesc"`
+	EppSessionToken string `json:"eppSessionToken"`
+}
+
+type loginXML struct {
+	ClientID    string `xml:"command>login>clID"`
+	Password    string `xml:"command>login>pw"`
+	NewPassword string `xml:"command>login>newPW"`
+	ClTRID      string `xml:"command>clTRID"`
 }
 
 func main() {
@@ -64,7 +86,7 @@ func main() {
 	defer stop()
 	limiter := newRateLimiter(cfg)
 
-	logger.Printf("listening on %s and forwarding to %s", cfg.ListenAddr, cfg.BackendAddr)
+	logger.Printf("listening on %s and forwarding auth=%s command=%s", cfg.ListenAddr, cfg.AuthBackendURL, cfg.CommandBackendURL)
 
 	var wg sync.WaitGroup
 	for {
@@ -84,7 +106,7 @@ func main() {
 		wg.Add(1)
 		go func(client net.Conn) {
 			defer wg.Done()
-			handleConn(ctx, cfg, logger, limiter, client)
+			handleConn(cfg, logger, limiter, client)
 		}(conn)
 	}
 
@@ -95,32 +117,30 @@ func main() {
 
 func loadConfig() Config {
 	listen := flag.String("listen", envOr("EPP_LISTEN_ADDR", ":700"), "address to listen on")
-	backend := flag.String("backend", envOr("EPP_BACKEND_ADDR", "127.0.0.1:1700"), "backend address")
 	connectTimeout := flag.Duration("connect-timeout", durationFromEnv("EPP_CONNECT_TIMEOUT", 5*time.Second), "backend connect timeout")
-	idleTimeout := flag.Duration("idle-timeout", durationFromEnv("EPP_IDLE_TIMEOUT", 10*time.Minute), "idle timeout for both directions")
+	idleTimeout := flag.Duration("idle-timeout", durationFromEnv("EPP_IDLE_TIMEOUT", 10*time.Minute), "idle timeout for client connection")
 	frontendTLS := flag.Bool("frontend-tls", boolFromEnv("EPP_FRONTEND_TLS", false), "enable TLS listener")
 	frontendCert := flag.String("frontend-cert", envOr("EPP_FRONTEND_CERT", "certs/server.crt"), "TLS cert path")
 	frontendKey := flag.String("frontend-key", envOr("EPP_FRONTEND_KEY", "certs/server.key"), "TLS key path")
-	backendTLS := flag.Bool("backend-tls", boolFromEnv("EPP_BACKEND_TLS", false), "connect to backend over TLS")
-	backendInsecure := flag.Bool("backend-insecure", boolFromEnv("EPP_BACKEND_INSECURE", false), "skip backend TLS certificate verification")
+	authURL := flag.String("auth-url", envOr("EPP_AUTH_URL", "http://localhost:8080/PANDI-REGISTRAR-0.1/authRegistrar/"), "backend auth URL")
+	commandURL := flag.String("command-url", envOr("EPP_COMMAND_URL", "http://localhost:8080/PANDI-CORE-0.1/processepp/"), "backend command URL")
 	rateLimitMax := flag.Int("rate-limit-max", intFromEnv("EPP_RATE_LIMIT_MAX", 10), "maximum EPP commands per rate-limit window")
 	rateLimitWindow := flag.Duration("rate-limit-window", durationFromEnv("EPP_RATE_LIMIT_WINDOW", time.Minute), "rate-limit window duration")
 	rateLimitBy := flag.String("rate-limit-by", strings.ToLower(envOr("EPP_RATE_LIMIT_BY", "ip_or_username")), "rate-limit key: ip, username, or ip_or_username")
 	flag.Parse()
 
 	return Config{
-		ListenAddr:      *listen,
-		BackendAddr:     *backend,
-		ConnectTimeout:  *connectTimeout,
-		IdleTimeout:     *idleTimeout,
-		FrontendTLS:     *frontendTLS,
-		FrontendCert:    *frontendCert,
-		FrontendKey:     *frontendKey,
-		BackendTLS:      *backendTLS,
-		BackendInsecure: *backendInsecure,
-		RateLimitMax:    *rateLimitMax,
-		RateLimitWindow: *rateLimitWindow,
-		RateLimitBy:     strings.ToLower(*rateLimitBy),
+		ListenAddr:        *listen,
+		ConnectTimeout:    *connectTimeout,
+		IdleTimeout:       *idleTimeout,
+		FrontendTLS:       *frontendTLS,
+		FrontendCert:      *frontendCert,
+		FrontendKey:       *frontendKey,
+		AuthBackendURL:    *authURL,
+		CommandBackendURL: *commandURL,
+		RateLimitMax:      *rateLimitMax,
+		RateLimitWindow:   *rateLimitWindow,
+		RateLimitBy:       strings.ToLower(*rateLimitBy),
 	}
 }
 
@@ -138,42 +158,30 @@ func buildListener(cfg Config) (net.Listener, error) {
 	return tls.Listen("tcp", cfg.ListenAddr, tlsCfg)
 }
 
-func handleConn(ctx context.Context, cfg Config, logger *log.Logger, limiter *rateLimiter, client net.Conn) {
+func handleConn(cfg Config, logger *log.Logger, limiter *rateLimiter, client net.Conn) {
 	defer client.Close()
 	clientID := client.RemoteAddr().String()
-
-	backend, err := dialBackend(ctx, cfg)
-	if err != nil {
-		logger.Printf("[%s] backend dial failed: %v", clientID, err)
-		return
-	}
-	defer backend.Close()
+	remoteAddr := remoteIP(client.RemoteAddr())
+	httpClient := &http.Client{Timeout: cfg.ConnectTimeout}
 
 	logger.Printf("[%s] connected", clientID)
-
-	_ = client.SetDeadline(time.Now().Add(cfg.IdleTimeout))
-	_ = backend.SetDeadline(time.Now().Add(cfg.IdleTimeout))
-
-	errCh := make(chan error, 2)
-	go proxy(errCh, client, backend)
-	go relayClientWithRateLimit(errCh, cfg, logger, limiter, client, backend)
-
-	if err := <-errCh; err != nil && !errors.Is(err, net.ErrClosed) && !errors.Is(err, io.EOF) {
-		logger.Printf("[%s] proxy ended with error: %v", clientID, err)
+	if err := writeEPPPayload(client, []byte(buildGreetingResponse())); err != nil {
+		logger.Printf("[%s] failed to send greeting: %v", clientID, err)
+		return
 	}
-	logger.Printf("[%s] disconnected", clientID)
-}
 
-func relayClientWithRateLimit(errCh chan<- error, cfg Config, logger *log.Logger, limiter *rateLimiter, client net.Conn, backend net.Conn) {
 	reader := bufio.NewReader(client)
-	remoteIP := remoteIP(client.RemoteAddr())
+	authenticated := false
 	username := ""
+	token := ""
 
 	for {
 		_ = client.SetReadDeadline(time.Now().Add(cfg.IdleTimeout))
 		payload, err := readEPPPayload(reader)
 		if err != nil {
-			errCh <- err
+			if !errors.Is(err, io.EOF) {
+				logger.Printf("[%s] read error: %v", clientID, err)
+			}
 			return
 		}
 
@@ -181,37 +189,138 @@ func relayClientWithRateLimit(errCh chan<- error, cfg Config, logger *log.Logger
 			username = extracted
 		}
 
-		if !limiter.Allow(remoteIP, username, cfg.RateLimitBy) {
-			logger.Printf("[%s] rate limit exceeded for key=%s", client.RemoteAddr(), limiter.Key(remoteIP, username, cfg.RateLimitBy))
-			if writeErr := writeEPPPayload(client, buildRateLimitExceededResponse()); writeErr != nil {
-				errCh <- writeErr
-				return
+		if !limiter.Allow(remoteAddr, username, cfg.RateLimitBy) {
+			logger.Printf("[%s] rate limit exceeded for key=%s", client.RemoteAddr(), limiter.Key(remoteAddr, username, cfg.RateLimitBy))
+			if err = writeEPPPayload(client, buildRateLimitExceededResponse()); err != nil {
+				logger.Printf("[%s] write rate-limit response failed: %v", clientID, err)
 			}
-			continue
-		}
-
-		_ = backend.SetWriteDeadline(time.Now().Add(cfg.IdleTimeout))
-		if writeErr := writeEPPPayload(backend, payload); writeErr != nil {
-			errCh <- writeErr
 			return
 		}
+
+		xmlBody := string(payload)
+		switch {
+		case !authenticated:
+			loginReq, parseErr := parseLoginXML(payload)
+			if parseErr != nil || loginReq.ClientID == "" {
+				_ = writeEPPPayload(client, []byte(buildErrorResponse("Expected <login>")))
+				return
+			}
+
+			tok, ok := processAuthorization(httpClient, cfg.AuthBackendURL, remoteAddr, loginReq)
+			if !ok {
+				_ = writeEPPPayload(client, []byte(buildAuthFailResponse()))
+				return
+			}
+
+			authenticated = true
+			token = tok
+			username = loginReq.ClientID
+			if err = writeEPPPayload(client, []byte(buildLoginResponse(loginReq.ClTRID))); err != nil {
+				logger.Printf("[%s] write login response failed: %v", clientID, err)
+				return
+			}
+
+		case strings.Contains(xmlBody, "<logout"):
+			clTRID := extractClTRID(payload)
+			_ = writeEPPPayload(client, []byte(buildLogoutResponse(clTRID)))
+			return
+
+		default:
+			if strings.TrimSpace(token) == "" {
+				_ = writeEPPPayload(client, []byte(buildErrorResponse("Missing session token")))
+				return
+			}
+
+			respBody, callErr := postEPPCommand(httpClient, cfg.CommandBackendURL, token, payload)
+			if callErr != nil {
+				logger.Printf("[%s] backend command error: %v", clientID, callErr)
+				_ = writeEPPPayload(client, []byte(buildErrorResponse("Unexpected server error")))
+				return
+			}
+			if err = writeEPPPayload(client, respBody); err != nil {
+				logger.Printf("[%s] write command response failed: %v", clientID, err)
+				return
+			}
+		}
 	}
 }
 
-func dialBackend(ctx context.Context, cfg Config) (net.Conn, error) {
-	dialer := net.Dialer{Timeout: cfg.ConnectTimeout}
-	if !cfg.BackendTLS {
-		return dialer.DialContext(ctx, "tcp", cfg.BackendAddr)
+func processAuthorization(httpClient *http.Client, authURL, clientIP string, loginReq loginXML) (string, bool) {
+	payload, err := json.Marshal(authRequest{
+		EppUsername:           loginReq.ClientID,
+		EppPassword:           loginReq.Password,
+		EppNewPassword:        loginReq.NewPassword,
+		ServerCertificateHash: "",
+		IPAddress:             clientIP,
+	})
+	if err != nil {
+		return "", false
 	}
 
-	tlsCfg := &tls.Config{InsecureSkipVerify: cfg.BackendInsecure}
-	return tls.DialWithDialer(&dialer, "tcp", cfg.BackendAddr, tlsCfg)
+	req, err := http.NewRequest(http.MethodPost, authURL, bytes.NewReader(payload))
+	if err != nil {
+		return "", false
+	}
+	req.Header.Set("authentication", "")
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return "", false
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", false
+	}
+
+	var parsed authResponse
+	if err = json.Unmarshal(body, &parsed); err != nil {
+		return "", false
+	}
+	if !strings.EqualFold(parsed.ResponseCode, "00") {
+		return "", false
+	}
+	return parsed.EppSessionToken, true
 }
 
-func proxy(errCh chan<- error, dst net.Conn, src net.Conn) {
-	_, err := io.Copy(dst, src)
-	_ = dst.SetDeadline(time.Now())
-	errCh <- err
+func postEPPCommand(httpClient *http.Client, backendURL, token string, payload []byte) ([]byte, error) {
+	req, err := http.NewRequest(http.MethodPost, backendURL, bytes.NewReader(payload))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("authentication", token)
+	req.Header.Set("Content-Type", "application/xml")
+
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	return io.ReadAll(resp.Body)
+}
+
+func parseLoginXML(payload []byte) (loginXML, error) {
+	var msg loginXML
+	decoder := xml.NewDecoder(bytes.NewReader(payload))
+	if err := decoder.Decode(&msg); err != nil {
+		return loginXML{}, err
+	}
+	msg.ClientID = strings.TrimSpace(msg.ClientID)
+	msg.Password = strings.TrimSpace(msg.Password)
+	msg.NewPassword = strings.TrimSpace(msg.NewPassword)
+	msg.ClTRID = strings.TrimSpace(msg.ClTRID)
+	return msg, nil
+}
+
+func extractClTRID(payload []byte) string {
+	msg, err := parseLoginXML(payload)
+	if err != nil {
+		return ""
+	}
+	return msg.ClTRID
 }
 
 func newRateLimiter(cfg Config) *rateLimiter {
@@ -289,26 +398,36 @@ func writeEPPPayload(dst net.Conn, payload []byte) error {
 }
 
 func extractEPPUsername(payload []byte) string {
-	type login struct {
-		ClientID string `xml:"clID"`
-	}
-	type command struct {
-		Login login `xml:"login"`
-	}
-	type epp struct {
-		Command command `xml:"command"`
-	}
-
-	var msg epp
-	decoder := xml.NewDecoder(bytes.NewReader(payload))
-	if err := decoder.Decode(&msg); err != nil {
+	msg, err := parseLoginXML(payload)
+	if err != nil {
 		return ""
 	}
-	return strings.TrimSpace(msg.Command.Login.ClientID)
+	return msg.ClientID
 }
 
 func buildRateLimitExceededResponse() []byte {
-	return []byte(`<?xml version="1.0" encoding="UTF-8" standalone="no"?><epp xmlns="urn:ietf:params:xml:ns:epp-1.0"><response><result code="2502"><msg>Session limit exceeded; EPP limit exceeded</msg></result><trID><svTRID>rate-limit</svTRID></trID></response></epp>`)
+	return []byte(`<?xml version="1.0" encoding="UTF-8" standalone="no"?><epp xmlns="urn:ietf:params:xml:ns:epp-1.0"><response><result code="2400"><msg>Rate limit exceeded; please retry later</msg></result><trID><svTRID>rate-limit</svTRID></trID></response></epp>`)
+}
+
+func buildGreetingResponse() string {
+	svDate := time.Now().UTC().Format(time.RFC3339)
+	return `<?xml version="1.0" encoding="UTF-8" standalone="no"?><epp xmlns="urn:ietf:params:xml:ns:epp-1.0"><greeting><svID>epp.adg.id</svID><svDate>` + svDate + `</svDate><svcMenu><version>1.0</version><lang>en</lang><objURI>urn:ietf:params:xml:ns:domain-1.0</objURI><objURI>urn:ietf:params:xml:ns:contact-1.0</objURI><objURI>urn:ietf:params:xml:ns:host-1.0</objURI><svcExtension><extURI>urn:ietf:params:xml:ns:secDNS-1.1</extURI><extURI>urn:ietf:params:xml:ns:launch-1.0</extURI><extURI>urn:ietf:params:xml:ns:rgp-1.0</extURI></svcExtension></svcMenu><dcp><access><all/></access><statement><purpose><admin/><prov/></purpose><recipient><ours/><public/></recipient><retention><stated/></retention></statement></dcp></greeting></epp>`
+}
+
+func buildLoginResponse(clTRID string) string {
+	return `<?xml version="1.0" encoding="UTF-8" standalone="no"?><epp xmlns="urn:ietf:params:xml:ns:epp-1.0"><response><result code="1000"><msg>Command completed successfully</msg></result><trID><clTRID>` + clTRID + `</clTRID><svTRID>go-proxy</svTRID></trID></response></epp>`
+}
+
+func buildAuthFailResponse() string {
+	return `<?xml version="1.0" encoding="UTF-8" standalone="no"?><epp xmlns="urn:ietf:params:xml:ns:epp-1.0"><response><result code="2200"><msg>Authentication failed</msg></result><trID><svTRID>go-proxy</svTRID></trID></response></epp>`
+}
+
+func buildErrorResponse(message string) string {
+	return `<?xml version="1.0" encoding="UTF-8" standalone="no"?><epp xmlns="urn:ietf:params:xml:ns:epp-1.0"><response><result code="2004"><msg>` + message + `</msg></result></response></epp>`
+}
+
+func buildLogoutResponse(clTRID string) string {
+	return `<?xml version="1.0" encoding="UTF-8" standalone="no"?><epp xmlns="urn:ietf:params:xml:ns:epp-1.0"><response><result code="1500"><msg>Command completed successfully; ending session</msg></result><trID><clTRID>` + clTRID + `</clTRID><svTRID>go-proxy</svTRID></trID></response></epp>`
 }
 
 func remoteIP(addr net.Addr) string {

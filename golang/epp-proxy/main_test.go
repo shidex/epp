@@ -5,6 +5,8 @@ import (
 	"bytes"
 	"encoding/binary"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"testing"
 	"time"
@@ -97,23 +99,23 @@ func TestRateLimiterKey(t *testing.T) {
 	}
 }
 
-func TestExtractEPPUsername(t *testing.T) {
-	xmlPayload := []byte(`<?xml version="1.0" encoding="UTF-8"?><epp xmlns="urn:ietf:params:xml:ns:epp-1.0"><command><login><clID>registrar1</clID></login></command></epp>`)
-	if got := extractEPPUsername(xmlPayload); got != "registrar1" {
-		t.Fatalf("expected registrar1, got %q", got)
+func TestParseLoginXML(t *testing.T) {
+	xmlPayload := []byte(`<?xml version="1.0" encoding="UTF-8"?><epp xmlns="urn:ietf:params:xml:ns:epp-1.0"><command><login><clID>registrar1</clID><pw>pw1</pw><newPW>pw2</newPW></login><clTRID>abc</clTRID></command></epp>`)
+	got, err := parseLoginXML(xmlPayload)
+	if err != nil {
+		t.Fatalf("parse login failed: %v", err)
 	}
-
-	if got := extractEPPUsername([]byte("invalid")); got != "" {
-		t.Fatalf("expected empty username for invalid XML, got %q", got)
+	if got.ClientID != "registrar1" || got.Password != "pw1" || got.NewPassword != "pw2" || got.ClTRID != "abc" {
+		t.Fatalf("unexpected parsed login: %+v", got)
 	}
 }
 
 func TestBuildRateLimitExceededResponse(t *testing.T) {
 	resp := string(buildRateLimitExceededResponse())
-	if !bytes.Contains([]byte(resp), []byte(`code="2502"`)) {
-		t.Fatalf("expected result code 2502 in response: %s", resp)
+	if !bytes.Contains([]byte(resp), []byte(`code="2400"`)) {
+		t.Fatalf("expected result code 2400 in response: %s", resp)
 	}
-	if !bytes.Contains([]byte(resp), []byte("EPP limit exceeded")) {
+	if !bytes.Contains([]byte(resp), []byte("Rate limit exceeded")) {
 		t.Fatalf("expected limit exceeded message in response: %s", resp)
 	}
 }
@@ -146,5 +148,37 @@ func TestReadEPPPayloadInvalidLength(t *testing.T) {
 	_, err := readEPPPayload(bufio.NewReader(bytes.NewReader(buf.Bytes())))
 	if err == nil {
 		t.Fatal("expected invalid frame length error")
+	}
+}
+
+func TestProcessAuthorizationAndCommand(t *testing.T) {
+	authSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("authentication") != "" {
+			t.Fatalf("expected empty authentication header for auth")
+		}
+		_, _ = w.Write([]byte(`{"responseCode":"00","eppSessionToken":"tok-1"}`))
+	}))
+	defer authSrv.Close()
+
+	cmdSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("authentication") != "tok-1" {
+			t.Fatalf("missing expected token header")
+		}
+		_, _ = w.Write([]byte(`<epp><response><result code="1000"/></response></epp>`))
+	}))
+	defer cmdSrv.Close()
+
+	httpClient := &http.Client{Timeout: time.Second}
+	token, ok := processAuthorization(httpClient, authSrv.URL, "1.1.1.1", loginXML{ClientID: "u", Password: "p"})
+	if !ok || token != "tok-1" {
+		t.Fatalf("unexpected auth result ok=%v token=%q", ok, token)
+	}
+
+	resp, err := postEPPCommand(httpClient, cmdSrv.URL, token, []byte("<epp/>"))
+	if err != nil {
+		t.Fatalf("postEPPCommand failed: %v", err)
+	}
+	if !bytes.Contains(resp, []byte(`code="1000"`)) {
+		t.Fatalf("unexpected command response: %s", string(resp))
 	}
 }
