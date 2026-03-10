@@ -22,8 +22,37 @@ import java.net.InetSocketAddress;
 import java.security.MessageDigest;
 import java.security.cert.X509Certificate;
 import java.util.UUID;
+import java.util.regex.Pattern;
 
 public class EppServerHandler extends ChannelInboundHandlerAdapter {
+
+    private static final Pattern PW_PATTERN = Pattern.compile("(<pw>)(.*?)(</pw>)", Pattern.CASE_INSENSITIVE | Pattern.DOTALL);
+    private static final Pattern NEW_PW_PATTERN = Pattern.compile("(<newPW>)(.*?)(</newPW>)", Pattern.CASE_INSENSITIVE | Pattern.DOTALL);
+
+    private void logIncomingXml(ChannelHandlerContext ctx, String message) {
+        boolean fullLogging = Boolean.parseBoolean(ConfigLoader.get("logging.xml.full", "false"));
+        int maxChars = Integer.parseInt(ConfigLoader.get("logging.xml.max.chars", "512"));
+
+        String sanitized = sanitizeSensitiveXml(message);
+        if (fullLogging) {
+            System.out.println("[RECEIVED XML] From " + ctx.channel().remoteAddress() + ":\n" + sanitized);
+            return;
+        }
+
+        String preview = sanitized.length() <= maxChars
+                ? sanitized
+                : sanitized.substring(0, maxChars) + "...(truncated)";
+
+        System.out.println("[RECEIVED XML] From " + ctx.channel().remoteAddress()
+                + " size=" + message.length()
+                + " preview=\"" + preview + "\"");
+    }
+
+    private String sanitizeSensitiveXml(String xml) {
+        String masked = PW_PATTERN.matcher(xml).replaceAll("$1***$3");
+        return NEW_PW_PATTERN.matcher(masked).replaceAll("$1***$3");
+    }
+
 
     @Override
     public void userEventTriggered(ChannelHandlerContext ctx, Object evt) {
@@ -65,7 +94,7 @@ public class EppServerHandler extends ChannelInboundHandlerAdapter {
             return;
         }
 
-        System.out.println("[RECEIVED XML] From " + ctx.channel().remoteAddress() + ":\n" + message);
+        logIncomingXml(ctx, message);
 
         String sessionId = UUID.randomUUID().toString();
         String clientIp = getClientIp(ctx);
