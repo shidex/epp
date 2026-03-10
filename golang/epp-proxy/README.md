@@ -92,6 +92,7 @@ Catatan balancing yang dipakai:
 - `EPP_MAX_CONNS` (default `1000`) batas koneksi concurrent diterima.
 - `EPP_RATELIMIT_MAX_KEYS` (default `100000`) batas key unik per scope rate limiter.
 - `EPP_LOG_FORMAT` (default `json`) format log: `json` atau `text`.
+- `EPP_PREMIUM_DOMAIN_FILE` (default `domainpremium.txt`) path file daftar domain premium yang harus langsung direspon "Domain tidak available" pada command `domain:check` tanpa forward ke backend.
 
 ## TLS frontend (sertifikat chain)
 - `TLS_SERVER_CERT` dapat berisi **full chain** dalam satu file PEM (urutan: leaf certificate lalu intermediate CA). Ini direkomendasikan agar klien dari luar menerima chain lengkap saat handshake.
