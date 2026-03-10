@@ -8,6 +8,7 @@ Service ini adalah versi Go yang membuka port `700` (default), menerima koneksi 
 - Opsi TLS di sisi frontend (listener)
 - Opsi TLS di sisi backend (upstream)
 - Graceful shutdown via SIGINT/SIGTERM
+- Built-in EPP command rate limiting (drop before forwarding to backend)
 
 ## Menjalankan
 Jalankan dari folder `golang/epp-proxy`:
@@ -34,8 +35,16 @@ cd golang/epp-proxy && EPP_LISTEN_ADDR=:700 EPP_BACKEND_ADDR=10.10.10.10:7000 go
 - `-frontend-key` / `EPP_FRONTEND_KEY` (default `certs/server.key`)
 - `-backend-tls` / `EPP_BACKEND_TLS` (default `false`)
 - `-backend-insecure` / `EPP_BACKEND_INSECURE` (default `false`)
+- `-rate-limit-max` / `EPP_RATE_LIMIT_MAX` (default `10`)
+- `-rate-limit-window` / `EPP_RATE_LIMIT_WINDOW` (default `1m`)
+- `-rate-limit-by` / `EPP_RATE_LIMIT_BY` (default `ip_or_username`, opsi: `ip`, `username`, `ip_or_username`)
 
 ## Build binary
 ```bash
 go build -o epp-forwarder .
 ```
+
+## Perilaku rate limit
+- Setiap frame perintah EPP dari client dihitung pada window yang dikonfigurasi.
+- Jika melebihi limit, proxy **tidak** meneruskan perintah ke backend dan langsung merespon EPP error code `2502` dengan pesan limit exceeded.
+- Untuk mode `username`, key diambil dari `<clID>` pada command login; jika belum ada, fallback ke IP client.
