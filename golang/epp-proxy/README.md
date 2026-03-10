@@ -1,6 +1,6 @@
-# Go EPP HTTP Bridge
+# Go EPP TCP Proxy (HTTP Backend Bridge)
 
-Service Go ini membuka port EPP (default `:700`), menerima frame EPP dari registrar, lalu meneruskan request ke backend HTTP seperti implementasi Java.
+Service Go ini membuka **port TCP EPP** (default `:700`), menerima frame EPP dari registrar, lalu meneruskan request ke backend HTTP seperti implementasi Java.
 
 `config.properties` Java dipakai sebagai **referensi mapping saja**. Runtime Go membaca konfigurasi dari file `.env`.
 
@@ -54,6 +54,19 @@ Contoh tersedia di `env.example`.
 - `EPP_MAX_CONNS` (default `1000`) batas koneksi concurrent diterima.
 - `EPP_RATELIMIT_MAX_KEYS` (default `100000`) batas key unik per scope rate limiter.
 - `EPP_LOG_FORMAT` (default `json`) format log: `json` atau `text`.
+
+## TLS frontend (sertifikat chain)
+- `TLS_SERVER_CERT` dapat berisi **full chain** dalam satu file PEM (urutan: leaf certificate lalu intermediate CA). Ini direkomendasikan agar klien dari luar menerima chain lengkap saat handshake.
+- `TLS_SERVER_KEY` tetap private key untuk leaf certificate.
+- `TLS_CA_CERT` dipakai untuk verifikasi **client certificate** saat `TLS_CLIENT_AUTH` = `OPTIONAL` atau `REQUIRE` (mTLS).
+- Jika `TLS_CLIENT_AUTH=NONE`, maka `TLS_CA_CERT` **boleh diabaikan** (tidak dibaca listener).
+- Listener dipaksa minimal TLS 1.2.
+
+Contoh membuat full chain:
+```bash
+cat certs/server.crt certs/intermediate-ca.crt > certs/server-fullchain.pem
+```
+Lalu set `TLS_SERVER_CERT=certs/server-fullchain.pem`.
 
 ## Menjalankan lokal
 ```bash
