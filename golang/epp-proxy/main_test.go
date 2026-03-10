@@ -8,10 +8,11 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
-	"encoding/pem"
 	"encoding/binary"
-	"math/big"
+	"encoding/pem"
+	"fmt"
 	"log"
+	"math/big"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -298,18 +299,84 @@ func TestProcessAuthorizationAndCommand(t *testing.T) {
 	defer cmdSrv.Close()
 
 	httpClient := &http.Client{Timeout: time.Second}
-	token, ok := processAuthorization(httpClient, authSrv.URL, "1.1.1.1", loginXML{ClientID: "u", Password: "p"})
+	token, ok := processAuthorization(httpClient, authSrv.URL, "1.1.1.1", loginXML{ClientID: "u", Password: "p"}, 1024)
 	if !ok || token != "tok-1" {
 		t.Fatalf("unexpected auth result ok=%v token=%q", ok, token)
 	}
 
-	resp, err := postEPPCommand(httpClient, cmdSrv.URL, token, []byte("<epp/>"))
+	resp, err := postEPPCommand(httpClient, cmdSrv.URL, token, []byte("<epp/>"), 1024)
 	if err != nil {
 		t.Fatalf("postEPPCommand failed: %v", err)
 	}
 	if !bytes.Contains(resp, []byte(`code="1000"`)) {
 		t.Fatalf("unexpected command response: %s", string(resp))
 	}
+}
+
+func TestPostEPPCommandStatusAndSizeLimit(t *testing.T) {
+	statusSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "bad gateway", http.StatusBadGateway)
+	}))
+	defer statusSrv.Close()
+
+	httpClient := &http.Client{Timeout: time.Second}
+	_, err := postEPPCommand(httpClient, statusSrv.URL, "tok", []byte("<epp/>"), 1024)
+	if err == nil {
+		t.Fatal("expected error when backend returns non-2xx")
+	}
+
+	largeSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("123456"))
+	}))
+	defer largeSrv.Close()
+
+	_, err = postEPPCommand(httpClient, largeSrv.URL, "tok", []byte("<epp/>"), 5)
+	if err == nil {
+		t.Fatal("expected size limit error")
+	}
+}
+
+func TestBuildResponsesEscapeXML(t *testing.T) {
+	login := buildLoginResponse(`<tag>&"`)
+	if bytes.Contains([]byte(login), []byte(`<clTRID><tag>&"</clTRID>`)) {
+		t.Fatal("clTRID should be XML escaped")
+	}
+
+	errResp := buildErrorResponse(`<oops>&`)
+	if bytes.Contains([]byte(errResp), []byte(`<msg><oops>&</msg>`)) {
+		t.Fatal("error message should be XML escaped")
+	}
+
+	logout := buildLogoutResponse(`<bye>&`)
+	if bytes.Contains([]byte(logout), []byte(`<clTRID><bye>&</clTRID>`)) {
+		t.Fatal("logout clTRID should be XML escaped")
+	}
+}
+
+func TestReadBodyWithLimit(t *testing.T) {
+	got, err := readBodyWithLimit(bytes.NewBufferString("abc"), 3)
+	if err != nil {
+		t.Fatalf("expected success, got %v", err)
+	}
+	if string(got) != "abc" {
+		t.Fatalf("unexpected body: %q", string(got))
+	}
+
+	_, err = readBodyWithLimit(bytes.NewBufferString("abcd"), 3)
+	if err == nil {
+		t.Fatal("expected limit exceeded error")
+	}
+
+	_, err = readBodyWithLimit(errReader{}, 3)
+	if err == nil {
+		t.Fatal("expected reader error")
+	}
+}
+
+type errReader struct{}
+
+func (errReader) Read(_ []byte) (int, error) {
+	return 0, fmt.Errorf("read failed")
 }
 
 func TestNewBackendHTTPClient(t *testing.T) {
@@ -349,19 +416,18 @@ func TestNewBackendHTTPClient(t *testing.T) {
 	}
 }
 
-
 func TestBuildListenerTLSSkipsCAWhenClientAuthNone(t *testing.T) {
 	rootKey, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
 		t.Fatalf("generate root key failed: %v", err)
 	}
 	rootTemplate := &x509.Certificate{
-		SerialNumber: big.NewInt(11),
-		Subject:      pkix.Name{CommonName: "root-ca"},
-		NotBefore:    time.Now().Add(-time.Hour),
-		NotAfter:     time.Now().Add(24 * time.Hour),
-		KeyUsage:     x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
-		IsCA:         true,
+		SerialNumber:          big.NewInt(11),
+		Subject:               pkix.Name{CommonName: "root-ca"},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(24 * time.Hour),
+		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
+		IsCA:                  true,
 		BasicConstraintsValid: true,
 	}
 	rootDER, err := x509.CreateCertificate(rand.Reader, rootTemplate, rootTemplate, &rootKey.PublicKey, rootKey)
@@ -423,12 +489,12 @@ func TestBuildListenerTLSWithFullChainCertificate(t *testing.T) {
 		t.Fatalf("generate root key failed: %v", err)
 	}
 	rootTemplate := &x509.Certificate{
-		SerialNumber: big.NewInt(1),
-		Subject:      pkix.Name{CommonName: "root-ca"},
-		NotBefore:    time.Now().Add(-time.Hour),
-		NotAfter:     time.Now().Add(24 * time.Hour),
-		KeyUsage:     x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
-		IsCA:         true,
+		SerialNumber:          big.NewInt(1),
+		Subject:               pkix.Name{CommonName: "root-ca"},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(24 * time.Hour),
+		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
+		IsCA:                  true,
 		BasicConstraintsValid: true,
 	}
 	rootDER, err := x509.CreateCertificate(rand.Reader, rootTemplate, rootTemplate, &rootKey.PublicKey, rootKey)
@@ -445,12 +511,12 @@ func TestBuildListenerTLSWithFullChainCertificate(t *testing.T) {
 		t.Fatalf("generate intermediate key failed: %v", err)
 	}
 	intermediateTemplate := &x509.Certificate{
-		SerialNumber: big.NewInt(2),
-		Subject:      pkix.Name{CommonName: "intermediate-ca"},
-		NotBefore:    time.Now().Add(-time.Hour),
-		NotAfter:     time.Now().Add(24 * time.Hour),
-		KeyUsage:     x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
-		IsCA:         true,
+		SerialNumber:          big.NewInt(2),
+		Subject:               pkix.Name{CommonName: "intermediate-ca"},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(24 * time.Hour),
+		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
+		IsCA:                  true,
 		BasicConstraintsValid: true,
 	}
 	intermediateDER, err := x509.CreateCertificate(rand.Reader, intermediateTemplate, rootCert, &intermediateKey.PublicKey, rootKey)

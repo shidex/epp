@@ -87,6 +87,7 @@ Catatan balancing yang dipakai:
 - `EPP_BACKEND_MAX_IDLE_CONNS` (default `2048`) pool idle koneksi backend global.
 - `EPP_BACKEND_MAX_IDLE_CONNS_PER_HOST` (default `1024`) pool idle koneksi backend per host.
 - `EPP_BACKEND_MAX_CONNS_PER_HOST` (default `0`) total koneksi backend per host (`0` = unlimited).
+- `EPP_BACKEND_RESPONSE_MAX_BYTES` (default `1048576`) batas maksimum ukuran body response backend yang dibaca proxy.
 - `EPP_WRITE_TIMEOUT` (default `10s`) timeout tulis response ke socket client.
 - `EPP_MAX_FRAME_BYTES` (default `65535`) batas ukuran frame EPP.
 - `EPP_MAX_CONNS` (default `1000`) batas koneksi concurrent diterima.

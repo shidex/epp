@@ -56,6 +56,7 @@ type Config struct {
 	BackendMaxIdleConns        int
 	BackendMaxIdleConnsPerHost int
 	BackendMaxConnsPerHost     int
+	BackendResponseMaxBytes    int64
 	LogFormat                  string
 }
 
@@ -184,6 +185,7 @@ func loadConfig() Config {
 	backendMaxIdleConns := flag.Int("backend-max-idle-conns", intWithFallback(envOr("EPP_BACKEND_MAX_IDLE_CONNS", "2048"), 2048), "maximum idle backend HTTP connections")
 	backendMaxIdleConnsPerHost := flag.Int("backend-max-idle-conns-per-host", intWithFallback(envOr("EPP_BACKEND_MAX_IDLE_CONNS_PER_HOST", "1024"), 1024), "maximum idle backend HTTP connections per host")
 	backendMaxConnsPerHost := flag.Int("backend-max-conns-per-host", intWithFallback(envOr("EPP_BACKEND_MAX_CONNS_PER_HOST", "0"), 0), "maximum total backend HTTP connections per host; 0 means unlimited")
+	backendResponseMaxBytes := flag.Int64("backend-response-max-bytes", int64(intWithFallback(envOr("EPP_BACKEND_RESPONSE_MAX_BYTES", "1048576"), 1048576)), "maximum response body bytes read from backend")
 	logFormat := flag.String("log-format", strings.ToLower(envOr("EPP_LOG_FORMAT", "json")), "log format: json or text")
 	flag.Parse()
 
@@ -218,6 +220,7 @@ func loadConfig() Config {
 		BackendMaxIdleConns:        *backendMaxIdleConns,
 		BackendMaxIdleConnsPerHost: *backendMaxIdleConnsPerHost,
 		BackendMaxConnsPerHost:     *backendMaxConnsPerHost,
+		BackendResponseMaxBytes:    *backendResponseMaxBytes,
 		LogFormat:                  *logFormat,
 	}
 }
@@ -315,7 +318,7 @@ func handleConn(cfg Config, logger *log.Logger, limiter *rateLimiter, httpClient
 				return
 			}
 
-			tok, ok := processAuthorization(httpClient, cfg.AuthBackendURL, remoteAddr, loginReq)
+			tok, ok := processAuthorization(httpClient, cfg.AuthBackendURL, remoteAddr, loginReq, cfg.BackendResponseMaxBytes)
 			if !ok {
 				logEvent(logger, cfg.LogFormat, "warn", "auth_failed", map[string]any{"channel": clientID, "remote_ip": remoteAddr, "username": loginReq.ClientID})
 				_ = client.SetWriteDeadline(time.Now().Add(cfg.WriteTimeout))
@@ -347,7 +350,7 @@ func handleConn(cfg Config, logger *log.Logger, limiter *rateLimiter, httpClient
 				return
 			}
 
-			respBody, callErr := postEPPCommand(httpClient, cfg.CommandBackendURL, token, payload)
+			respBody, callErr := postEPPCommand(httpClient, cfg.CommandBackendURL, token, payload, cfg.BackendResponseMaxBytes)
 			if callErr != nil {
 				logEvent(logger, cfg.LogFormat, "error", "backend_command_failed", map[string]any{"channel": clientID, "username": username, "error": callErr.Error()})
 				_ = client.SetWriteDeadline(time.Now().Add(cfg.WriteTimeout))
@@ -363,7 +366,7 @@ func handleConn(cfg Config, logger *log.Logger, limiter *rateLimiter, httpClient
 	}
 }
 
-func processAuthorization(httpClient *http.Client, authURL, clientIP string, loginReq loginXML) (string, bool) {
+func processAuthorization(httpClient *http.Client, authURL, clientIP string, loginReq loginXML, maxResponseBytes int64) (string, bool) {
 	payload, err := json.Marshal(authRequest{
 		EppUsername:           loginReq.ClientID,
 		EppPassword:           loginReq.Password,
@@ -387,8 +390,11 @@ func processAuthorization(httpClient *http.Client, authURL, clientIP string, log
 		return "", false
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		return "", false
+	}
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := readBodyWithLimit(resp.Body, maxResponseBytes)
 	if err != nil {
 		return "", false
 	}
@@ -403,7 +409,7 @@ func processAuthorization(httpClient *http.Client, authURL, clientIP string, log
 	return parsed.EppSessionToken, true
 }
 
-func postEPPCommand(httpClient *http.Client, backendURL, token string, payload []byte) ([]byte, error) {
+func postEPPCommand(httpClient *http.Client, backendURL, token string, payload []byte, maxResponseBytes int64) ([]byte, error) {
 	req, err := http.NewRequest(http.MethodPost, backendURL, bytes.NewReader(payload))
 	if err != nil {
 		return nil, err
@@ -416,8 +422,26 @@ func postEPPCommand(httpClient *http.Client, backendURL, token string, payload [
 		return nil, err
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		return nil, fmt.Errorf("backend returned status %d", resp.StatusCode)
+	}
 
-	return io.ReadAll(resp.Body)
+	return readBodyWithLimit(resp.Body, maxResponseBytes)
+}
+
+func readBodyWithLimit(body io.Reader, maxBytes int64) ([]byte, error) {
+	if maxBytes <= 0 {
+		maxBytes = 1 << 20
+	}
+	limited := io.LimitReader(body, maxBytes+1)
+	raw, err := io.ReadAll(limited)
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(raw)) > maxBytes {
+		return nil, fmt.Errorf("response body exceeded limit of %d bytes", maxBytes)
+	}
+	return raw, nil
 }
 
 func parseLoginXML(payload []byte) (loginXML, error) {
@@ -626,7 +650,7 @@ func buildGreetingResponse() string {
 }
 
 func buildLoginResponse(clTRID string) string {
-	return `<?xml version="1.0" encoding="UTF-8" standalone="no"?><epp xmlns="urn:ietf:params:xml:ns:epp-1.0"><response><result code="1000"><msg>Command completed successfully</msg></result><trID><clTRID>` + clTRID + `</clTRID><svTRID>go-proxy</svTRID></trID></response></epp>`
+	return `<?xml version="1.0" encoding="UTF-8" standalone="no"?><epp xmlns="urn:ietf:params:xml:ns:epp-1.0"><response><result code="1000"><msg>Command completed successfully</msg></result><trID><clTRID>` + escapeXML(clTRID) + `</clTRID><svTRID>go-proxy</svTRID></trID></response></epp>`
 }
 
 func buildAuthFailResponse() string {
@@ -634,11 +658,19 @@ func buildAuthFailResponse() string {
 }
 
 func buildErrorResponse(message string) string {
-	return `<?xml version="1.0" encoding="UTF-8" standalone="no"?><epp xmlns="urn:ietf:params:xml:ns:epp-1.0"><response><result code="2004"><msg>` + message + `</msg></result></response></epp>`
+	return `<?xml version="1.0" encoding="UTF-8" standalone="no"?><epp xmlns="urn:ietf:params:xml:ns:epp-1.0"><response><result code="2004"><msg>` + escapeXML(message) + `</msg></result></response></epp>`
 }
 
 func buildLogoutResponse(clTRID string) string {
-	return `<?xml version="1.0" encoding="UTF-8" standalone="no"?><epp xmlns="urn:ietf:params:xml:ns:epp-1.0"><response><result code="1500"><msg>Command completed successfully; ending session</msg></result><trID><clTRID>` + clTRID + `</clTRID><svTRID>go-proxy</svTRID></trID></response></epp>`
+	return `<?xml version="1.0" encoding="UTF-8" standalone="no"?><epp xmlns="urn:ietf:params:xml:ns:epp-1.0"><response><result code="1500"><msg>Command completed successfully; ending session</msg></result><trID><clTRID>` + escapeXML(clTRID) + `</clTRID><svTRID>go-proxy</svTRID></trID></response></epp>`
+}
+
+func escapeXML(value string) string {
+	buf := &bytes.Buffer{}
+	if err := xml.EscapeText(buf, []byte(value)); err != nil {
+		return ""
+	}
+	return buf.String()
 }
 
 func remoteIP(addr net.Addr) string {
