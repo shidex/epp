@@ -40,6 +40,8 @@ type Config struct {
 	IPRateLimitRules  []rateLimitRule
 	ClientRateLimit   []rateLimitRule
 	ChannelRateLimit  []rateLimitRule
+	WriteRateLimit    []rateLimitRule
+	ReadRateLimit     []rateLimitRule
 	MaxFrameSize      int
 }
 
@@ -140,6 +142,8 @@ func loadConfig() Config {
 	rateLimitIP := flag.String("rate-limit-ip", envOrFirst([]string{"RATELIMIT_IP_RULES", "EPP_RATE_LIMIT_IP_RULES"}, "10/second,60/minute"), "rate limit rules by IP")
 	rateLimitClient := flag.String("rate-limit-client", envOrFirst([]string{"RATELIMIT_CLIENT_RULES", "EPP_RATE_LIMIT_CLIENT_RULES"}, "50/second,500/minute"), "rate limit rules by client ID")
 	rateLimitChannel := flag.String("rate-limit-channel", envOrFirst([]string{"RATELIMIT_CHANNEL_RULES", "EPP_RATE_LIMIT_CHANNEL_RULES"}, "10/second,60/minute"), "rate limit rules by channel")
+	rateLimitWrite := flag.String("rate-limit-write", envOrFirst([]string{"RATELIMIT_WRITE_RULES", "EPP_RATE_LIMIT_WRITE_RULES"}, "10/second"), "rate limit rules for write commands (domain/host/contact create-update-renew-delete-transfer)")
+	rateLimitRead := flag.String("rate-limit-read", envOrFirst([]string{"RATELIMIT_READ_RULES", "EPP_RATE_LIMIT_READ_RULES"}, "50/second,500/minute"), "rate limit rules for read commands (login-logout-check-info)")
 	maxFrameSize := flag.Int("max-frame-size", intWithFallback(envOr("EPP_MAX_FRAME_BYTES", "65535"), 65535), "maximum RFC5734 frame size in bytes")
 	flag.Parse()
 
@@ -158,6 +162,8 @@ func loadConfig() Config {
 		IPRateLimitRules:  parseRateLimitRules(*rateLimitIP),
 		ClientRateLimit:   parseRateLimitRules(*rateLimitClient),
 		ChannelRateLimit:  parseRateLimitRules(*rateLimitChannel),
+		WriteRateLimit:    parseRateLimitRules(*rateLimitWrite),
+		ReadRateLimit:     parseRateLimitRules(*rateLimitRead),
 		MaxFrameSize:      *maxFrameSize,
 	}
 }
@@ -220,7 +226,8 @@ func handleConn(cfg Config, logger *log.Logger, limiter *rateLimiter, client net
 			username = extracted
 		}
 
-		if !limiter.Allow(remoteAddr, username, clientID, cfg) {
+		commandType := classifyCommandType(payload)
+		if !limiter.Allow(remoteAddr, username, clientID, commandType, cfg) {
 			logger.Printf("[%s] rate limit exceeded", client.RemoteAddr())
 			if err = writeEPPPayload(client, buildRateLimitExceededResponse()); err != nil {
 				logger.Printf("[%s] write rate-limit response failed: %v", clientID, err)
@@ -358,7 +365,7 @@ func newRateLimiter(cfg Config) *rateLimiter {
 	return &rateLimiter{buckets: make(map[string]map[string][]bucket)}
 }
 
-func (r *rateLimiter) Allow(ip, username, channelID string, cfg Config) bool {
+func (r *rateLimiter) Allow(ip, username, channelID, commandType string, cfg Config) bool {
 	now := time.Now()
 
 	r.mu.Lock()
@@ -370,7 +377,50 @@ func (r *rateLimiter) Allow(ip, username, channelID string, cfg Config) bool {
 	if username != "" && !r.allowForScope("client", username, cfg.ClientRateLimit, now) {
 		return false
 	}
-	return r.allowForScope("channel", channelID, cfg.ChannelRateLimit, now)
+	if !r.allowForScope("channel", channelID, cfg.ChannelRateLimit, now) {
+		return false
+	}
+
+	opKey := username
+	if opKey == "" {
+		opKey = ip
+	}
+
+	switch commandType {
+	case "write":
+		return r.allowForScope("write", opKey, cfg.WriteRateLimit, now)
+	case "read":
+		return r.allowForScope("read", opKey, cfg.ReadRateLimit, now)
+	default:
+		return true
+	}
+}
+
+func classifyCommandType(payload []byte) string {
+	xmlBody := strings.ToLower(string(payload))
+
+	if strings.Contains(xmlBody, "<login") || strings.Contains(xmlBody, "<logout") {
+		return "read"
+	}
+
+	objects := []string{"domain", "host", "contact"}
+	writeVerbs := []string{"create", "update", "renew", "delete", "transfer"}
+	for _, obj := range objects {
+		for _, verb := range writeVerbs {
+			if strings.Contains(xmlBody, "<"+obj+":"+verb) {
+				return "write"
+			}
+		}
+		if strings.Contains(xmlBody, "<"+obj+":check") || strings.Contains(xmlBody, "<"+obj+":info") {
+			return "read"
+		}
+	}
+
+	if strings.Contains(xmlBody, ":check") || strings.Contains(xmlBody, ":info") {
+		return "read"
+	}
+
+	return ""
 }
 
 func (r *rateLimiter) allowForScope(scope, key string, rules []rateLimitRule, now time.Time) bool {

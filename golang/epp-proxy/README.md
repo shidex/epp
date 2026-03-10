@@ -20,6 +20,8 @@ Contoh tersedia di `env.example`.
 - `ratelimit.ip.rules` -> `RATELIMIT_IP_RULES`
 - `ratelimit.client.rules` -> `RATELIMIT_CLIENT_RULES`
 - `ratelimit.channel.rules` -> `RATELIMIT_CHANNEL_RULES`
+- `ratelimit.write.rules` -> `RATELIMIT_WRITE_RULES` (default: `10/second` untuk operasi write seperti `create/update/renew/delete/transfer` pada domain/host/contact)
+- `ratelimit.read.rules` -> `RATELIMIT_READ_RULES` (default: `50/second,500/minute` untuk operasi read seperti `login/logout/check/info`)
 
 ## Menjalankan
 ```bash
@@ -40,6 +42,7 @@ go run . -env-file /path/to/.env
 - `-auth-url`, `-command-url`, `-logout-url`
 - `-idle-timeout`, `-connect-timeout`
 - `-rate-limit-ip`, `-rate-limit-client`, `-rate-limit-channel`
+- `-rate-limit-write`, `-rate-limit-read`
 - `-max-frame-size`
 
 ## Build
