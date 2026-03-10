@@ -4,6 +4,19 @@ Service Go ini membuka port EPP (default `:700`), menerima frame EPP dari regist
 
 `config.properties` Java dipakai sebagai **referensi mapping saja**. Runtime Go membaca konfigurasi dari file `.env`.
 
+## Fitur penting
+- Parsing frame EPP RFC5734 dengan validasi panjang frame (`EPP_MAX_FRAME_BYTES`).
+- TLS frontend opsional + mTLS (`TLS_CLIENT_AUTH=REQUIRE|OPTIONAL|NONE`).
+- Auth login registrar ke backend auth, lalu command forward ke backend command.
+- Mitigasi flood / DDoS berbasis rate limit multi-dimensi:
+  - per IP,
+  - per client/username,
+  - per channel (koneksi),
+  - per tipe command (`read` vs `write`) untuk IP dan client.
+- Perlindungan cardinality attack pada rate limiter via batas maksimal key aktif (`EPP_RATELIMIT_MAX_KEYS`).
+- Batas koneksi concurrent (`EPP_MAX_CONNS`) agar service tetap stabil saat traffic spike.
+- Logging format JSON (default) supaya mudah diolah PM2/log pipeline.
+
 ## Konfigurasi `.env`
 Default file yang dibaca: `./.env` (bisa diubah via `-env-file` atau `EPP_ENV_FILE`).
 
@@ -27,7 +40,15 @@ Contoh tersedia di `env.example`.
 - `ratelimit.read.client.rules` -> `RATELIMIT_READ_CLIENT_RULES`
 - `ratelimit.write.client.rules` -> `RATELIMIT_WRITE_CLIENT_RULES`
 
-## Menjalankan
+### Variabel tambahan (operasional)
+- `EPP_CONNECT_TIMEOUT` (default `5s`) timeout call backend.
+- `EPP_WRITE_TIMEOUT` (default `10s`) timeout tulis response ke socket client.
+- `EPP_MAX_FRAME_BYTES` (default `65535`) batas ukuran frame EPP.
+- `EPP_MAX_CONNS` (default `1000`) batas koneksi concurrent diterima.
+- `EPP_RATELIMIT_MAX_KEYS` (default `100000`) batas key unik per scope rate limiter.
+- `EPP_LOG_FORMAT` (default `json`) format log: `json` atau `text`.
+
+## Menjalankan lokal
 ```bash
 cd golang/epp-proxy
 cp env.example .env
@@ -39,19 +60,35 @@ Atau custom env path:
 go run . -env-file /path/to/.env
 ```
 
-## Opsi penting
-- `-env-file` / `EPP_ENV_FILE`
-- `-listen`
-- `-frontend-tls`, `-frontend-cert`, `-frontend-key`, `-frontend-ca`, `-tls-client-auth`
-- `-auth-url`, `-command-url`, `-logout-url`
-- `-idle-timeout`, `-connect-timeout`
-- `-rate-limit-ip`, `-rate-limit-client`, `-rate-limit-channel`
-- `-rate-limit-write`, `-rate-limit-read` (legacy)
-- `-rate-limit-read-ip`, `-rate-limit-write-ip`
-- `-rate-limit-read-client`, `-rate-limit-write-client`
-- `-max-frame-size`
-
 ## Build
 ```bash
 go build -o epp-http-bridge .
 ```
+
+## Menjalankan dengan PM2
+1. Build binary:
+```bash
+go build -o epp-http-bridge .
+```
+2. Siapkan folder log:
+```bash
+mkdir -p logs
+```
+3. Start via ecosystem file:
+```bash
+pm2 start ecosystem.config.js
+```
+4. Cek status/log:
+```bash
+pm2 status
+pm2 logs go-epp-proxy
+```
+
+`ecosystem.config.js` sudah disediakan dan default memakai `EPP_LOG_FORMAT=json`.
+
+## Catatan hardening DDoS
+- Mulai tuning dari `RATELIMIT_IP_RULES` + `RATELIMIT_CHANNEL_RULES` untuk menahan burst awal.
+- Pisahkan read/write limit dengan `RATELIMIT_READ_*` dan `RATELIMIT_WRITE_*` agar operasi write lebih ketat.
+- Aktifkan mTLS (`SERVER_SSL_ENABLED=true` + `TLS_CLIENT_AUTH=REQUIRE`) agar hanya registrar resmi yang bisa connect.
+- Set `EPP_MAX_CONNS` sesuai kapasitas CPU/RAM host.
+- Pastikan firewall/L4 LB juga punya proteksi SYN flood dan connection limit per source IP.

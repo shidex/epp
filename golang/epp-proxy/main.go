@@ -29,6 +29,7 @@ type Config struct {
 	ListenAddr        string
 	ConnectTimeout    time.Duration
 	IdleTimeout       time.Duration
+	WriteTimeout      time.Duration
 	FrontendTLS       bool
 	FrontendCert      string
 	FrontendKey       string
@@ -47,11 +48,15 @@ type Config struct {
 	ReadClientLimit   []rateLimitRule
 	WriteClientLimit  []rateLimitRule
 	MaxFrameSize      int
+	MaxConns          int
+	RateLimitMaxKeys  int
+	LogFormat         string
 }
 
 type rateLimiter struct {
 	mu      sync.Mutex
 	buckets map[string]map[string][]bucket
+	maxKeys int
 }
 
 type bucket struct {
@@ -98,8 +103,9 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 	limiter := newRateLimiter(cfg)
+	connSlots := make(chan struct{}, max(1, cfg.MaxConns))
 
-	logger.Printf("listening on %s and forwarding auth=%s command=%s", cfg.ListenAddr, cfg.AuthBackendURL, cfg.CommandBackendURL)
+	logEvent(logger, cfg.LogFormat, "info", "service_started", map[string]any{"listen_addr": cfg.ListenAddr, "auth_url": cfg.AuthBackendURL, "command_url": cfg.CommandBackendURL, "max_conns": cfg.MaxConns})
 
 	var wg sync.WaitGroup
 	for {
@@ -117,13 +123,22 @@ func main() {
 		}
 
 		wg.Add(1)
+		select {
+		case connSlots <- struct{}{}:
+		default:
+			logEvent(logger, cfg.LogFormat, "warn", "connection_rejected", map[string]any{"remote_addr": conn.RemoteAddr().String(), "reason": "max_conns_reached"})
+			_ = conn.Close()
+			wg.Done()
+			continue
+		}
 		go func(client net.Conn) {
 			defer wg.Done()
+			defer func() { <-connSlots }()
 			handleConn(cfg, logger, limiter, client)
 		}(conn)
 	}
 
-	logger.Println("shutting down listener")
+	logEvent(logger, cfg.LogFormat, "info", "service_stopping", nil)
 	_ = ln.Close()
 	wg.Wait()
 }
@@ -135,6 +150,7 @@ func loadConfig() Config {
 	listen := flag.String("listen", resolveAddr(envOrFirst([]string{"SERVER_PORT", "EPP_SERVER_PORT", "EPP_LISTEN_ADDR"}, "700")), "address to listen on")
 	connectTimeout := flag.Duration("connect-timeout", durationWithFallback(envOr("EPP_CONNECT_TIMEOUT", "5s"), 5*time.Second), "backend connect timeout")
 	idleTimeout := flag.Duration("idle-timeout", durationWithFallback(envOrFirst([]string{"IDLE_TIMEOUT_SECONDS", "EPP_IDLE_TIMEOUT"}, "600"), 10*time.Minute), "idle timeout for client connection")
+	writeTimeout := flag.Duration("write-timeout", durationWithFallback(envOr("EPP_WRITE_TIMEOUT", "10s"), 10*time.Second), "write timeout for client connection")
 	frontendTLS := flag.Bool("frontend-tls", boolWithFallback(envOrFirst([]string{"SERVER_SSL_ENABLED", "EPP_FRONTEND_TLS"}, "false"), false), "enable TLS listener")
 	frontendCert := flag.String("frontend-cert", envOrFirst([]string{"TLS_SERVER_CERT", "EPP_FRONTEND_CERT"}, "certs/server.crt"), "TLS cert path")
 	frontendKey := flag.String("frontend-key", envOrFirst([]string{"TLS_SERVER_KEY", "EPP_FRONTEND_KEY"}, "certs/server.key"), "TLS key path")
@@ -153,12 +169,16 @@ func loadConfig() Config {
 	rateLimitReadClient := flag.String("rate-limit-read-client", envOrFirst([]string{"RATELIMIT_READ_CLIENT_RULES", "EPP_RATE_LIMIT_READ_CLIENT_RULES", "RATELIMIT_READ_RULES", "EPP_RATE_LIMIT_READ_RULES", "RATELIMIT_CLIENT_RULES", "EPP_RATE_LIMIT_CLIENT_RULES"}, "50/second,500/minute"), "rate limit rules for read commands by username/client")
 	rateLimitWriteClient := flag.String("rate-limit-write-client", envOrFirst([]string{"RATELIMIT_WRITE_CLIENT_RULES", "EPP_RATE_LIMIT_WRITE_CLIENT_RULES", "RATELIMIT_WRITE_RULES", "EPP_RATE_LIMIT_WRITE_RULES", "RATELIMIT_CLIENT_RULES", "EPP_RATE_LIMIT_CLIENT_RULES"}, "50/second,500/minute"), "rate limit rules for write commands by username/client")
 	maxFrameSize := flag.Int("max-frame-size", intWithFallback(envOr("EPP_MAX_FRAME_BYTES", "65535"), 65535), "maximum RFC5734 frame size in bytes")
+	maxConns := flag.Int("max-conns", intWithFallback(envOr("EPP_MAX_CONNS", "1000"), 1000), "maximum concurrent accepted connections")
+	rateLimitMaxKeys := flag.Int("rate-limit-max-keys", intWithFallback(envOr("EPP_RATELIMIT_MAX_KEYS", "100000"), 100000), "maximum tracked keys per rate limiter scope")
+	logFormat := flag.String("log-format", strings.ToLower(envOr("EPP_LOG_FORMAT", "json")), "log format: json or text")
 	flag.Parse()
 
 	return Config{
 		ListenAddr:        *listen,
 		ConnectTimeout:    *connectTimeout,
 		IdleTimeout:       *idleTimeout,
+		WriteTimeout:      *writeTimeout,
 		FrontendTLS:       *frontendTLS,
 		FrontendCert:      *frontendCert,
 		FrontendKey:       *frontendKey,
@@ -177,6 +197,9 @@ func loadConfig() Config {
 		ReadClientLimit:   parseRateLimitRules(*rateLimitReadClient),
 		WriteClientLimit:  parseRateLimitRules(*rateLimitWriteClient),
 		MaxFrameSize:      *maxFrameSize,
+		MaxConns:          *maxConns,
+		RateLimitMaxKeys:  *rateLimitMaxKeys,
+		LogFormat:         *logFormat,
 	}
 }
 
@@ -213,9 +236,9 @@ func handleConn(cfg Config, logger *log.Logger, limiter *rateLimiter, client net
 	remoteAddr := remoteIP(client.RemoteAddr())
 	httpClient := &http.Client{Timeout: cfg.ConnectTimeout}
 
-	logger.Printf("[%s] connected", clientID)
+	logEvent(logger, cfg.LogFormat, "info", "client_connected", map[string]any{"channel": clientID, "remote_ip": remoteAddr})
 	if err := writeEPPPayload(client, []byte(buildGreetingResponse())); err != nil {
-		logger.Printf("[%s] failed to send greeting: %v", clientID, err)
+		logEvent(logger, cfg.LogFormat, "error", "greeting_failed", map[string]any{"channel": clientID, "error": err.Error()})
 		return
 	}
 
@@ -229,7 +252,7 @@ func handleConn(cfg Config, logger *log.Logger, limiter *rateLimiter, client net
 		payload, err := readEPPPayload(reader, cfg.MaxFrameSize)
 		if err != nil {
 			if !errors.Is(err, io.EOF) {
-				logger.Printf("[%s] read error: %v", clientID, err)
+				logEvent(logger, cfg.LogFormat, "warn", "read_failed", map[string]any{"channel": clientID, "error": err.Error()})
 			}
 			return
 		}
@@ -240,9 +263,10 @@ func handleConn(cfg Config, logger *log.Logger, limiter *rateLimiter, client net
 
 		commandType := classifyCommandType(payload)
 		if !limiter.Allow(remoteAddr, username, clientID, commandType, cfg) {
-			logger.Printf("[%s] rate limit exceeded", client.RemoteAddr())
+			logEvent(logger, cfg.LogFormat, "warn", "rate_limited", map[string]any{"channel": clientID, "remote_ip": remoteAddr, "username": username, "command_type": commandType})
+			_ = client.SetWriteDeadline(time.Now().Add(cfg.WriteTimeout))
 			if err = writeEPPPayload(client, buildRateLimitExceededResponse()); err != nil {
-				logger.Printf("[%s] write rate-limit response failed: %v", clientID, err)
+				logEvent(logger, cfg.LogFormat, "error", "write_rate_limit_response_failed", map[string]any{"channel": clientID, "error": err.Error()})
 			}
 			return
 		}
@@ -252,12 +276,16 @@ func handleConn(cfg Config, logger *log.Logger, limiter *rateLimiter, client net
 		case !authenticated:
 			loginReq, parseErr := parseLoginXML(payload)
 			if parseErr != nil || loginReq.ClientID == "" {
+				logEvent(logger, cfg.LogFormat, "warn", "invalid_login_payload", map[string]any{"channel": clientID})
+				_ = client.SetWriteDeadline(time.Now().Add(cfg.WriteTimeout))
 				_ = writeEPPPayload(client, []byte(buildErrorResponse("Expected <login>")))
 				return
 			}
 
 			tok, ok := processAuthorization(httpClient, cfg.AuthBackendURL, remoteAddr, loginReq)
 			if !ok {
+				logEvent(logger, cfg.LogFormat, "warn", "auth_failed", map[string]any{"channel": clientID, "remote_ip": remoteAddr, "username": loginReq.ClientID})
+				_ = client.SetWriteDeadline(time.Now().Add(cfg.WriteTimeout))
 				_ = writeEPPPayload(client, []byte(buildAuthFailResponse()))
 				return
 			}
@@ -265,30 +293,37 @@ func handleConn(cfg Config, logger *log.Logger, limiter *rateLimiter, client net
 			authenticated = true
 			token = tok
 			username = loginReq.ClientID
+			logEvent(logger, cfg.LogFormat, "info", "auth_success", map[string]any{"channel": clientID, "remote_ip": remoteAddr, "username": username})
+			_ = client.SetWriteDeadline(time.Now().Add(cfg.WriteTimeout))
 			if err = writeEPPPayload(client, []byte(buildLoginResponse(loginReq.ClTRID))); err != nil {
-				logger.Printf("[%s] write login response failed: %v", clientID, err)
+				logEvent(logger, cfg.LogFormat, "error", "write_login_response_failed", map[string]any{"channel": clientID, "error": err.Error()})
 				return
 			}
 
 		case strings.Contains(xmlBody, "<logout"):
 			clTRID := extractClTRID(payload)
+			_ = client.SetWriteDeadline(time.Now().Add(cfg.WriteTimeout))
 			_ = writeEPPPayload(client, []byte(buildLogoutResponse(clTRID)))
+			logEvent(logger, cfg.LogFormat, "info", "client_logout", map[string]any{"channel": clientID, "username": username})
 			return
 
 		default:
 			if strings.TrimSpace(token) == "" {
+				_ = client.SetWriteDeadline(time.Now().Add(cfg.WriteTimeout))
 				_ = writeEPPPayload(client, []byte(buildErrorResponse("Missing session token")))
 				return
 			}
 
 			respBody, callErr := postEPPCommand(httpClient, cfg.CommandBackendURL, token, payload)
 			if callErr != nil {
-				logger.Printf("[%s] backend command error: %v", clientID, callErr)
+				logEvent(logger, cfg.LogFormat, "error", "backend_command_failed", map[string]any{"channel": clientID, "username": username, "error": callErr.Error()})
+				_ = client.SetWriteDeadline(time.Now().Add(cfg.WriteTimeout))
 				_ = writeEPPPayload(client, []byte(buildErrorResponse("Unexpected server error")))
 				return
 			}
+			_ = client.SetWriteDeadline(time.Now().Add(cfg.WriteTimeout))
 			if err = writeEPPPayload(client, respBody); err != nil {
-				logger.Printf("[%s] write command response failed: %v", clientID, err)
+				logEvent(logger, cfg.LogFormat, "error", "write_command_response_failed", map[string]any{"channel": clientID, "error": err.Error()})
 				return
 			}
 		}
@@ -374,7 +409,11 @@ func extractClTRID(payload []byte) string {
 }
 
 func newRateLimiter(cfg Config) *rateLimiter {
-	return &rateLimiter{buckets: make(map[string]map[string][]bucket)}
+	maxKeys := cfg.RateLimitMaxKeys
+	if maxKeys <= 0 {
+		maxKeys = 100000
+	}
+	return &rateLimiter{buckets: make(map[string]map[string][]bucket), maxKeys: maxKeys}
 }
 
 func (r *rateLimiter) Allow(ip, username, channelID, commandType string, cfg Config) bool {
@@ -468,6 +507,9 @@ func (r *rateLimiter) allowForScope(scope, key string, rules []rateLimitRule, no
 		scopeBuckets = map[string][]bucket{}
 		r.buckets[scope] = scopeBuckets
 	}
+	if _, exists := scopeBuckets[key]; !exists && len(scopeBuckets) >= r.maxKeys {
+		return false
+	}
 
 	buckets := scopeBuckets[key]
 	if len(buckets) != len(rules) {
@@ -493,6 +535,23 @@ func (r *rateLimiter) allowForScope(scope, key string, rules []rateLimitRule, no
 
 	scopeBuckets[key] = buckets
 	return true
+}
+
+func logEvent(logger *log.Logger, format, level, event string, fields map[string]any) {
+	if strings.EqualFold(format, "text") {
+		logger.Printf("level=%s event=%s fields=%v", level, event, fields)
+		return
+	}
+	payload := map[string]any{"level": level, "event": event}
+	for k, v := range fields {
+		payload[k] = v
+	}
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		logger.Printf("level=error event=log_marshal_failed err=%v", err)
+		return
+	}
+	logger.Println(string(raw))
 }
 
 func readEPPPayload(reader *bufio.Reader, maxFrameSize int) ([]byte, error) {

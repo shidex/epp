@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"crypto/tls"
 	"encoding/binary"
+	"log"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -130,13 +131,13 @@ func TestRateLimiterAllowWriteAndReadBuckets(t *testing.T) {
 func TestRateLimiterAllowReadWriteByIPAndClient(t *testing.T) {
 	limiter := newRateLimiter(Config{})
 	cfg := Config{
-		WriteIPRateLimit:  []rateLimitRule{{limit: 5, window: time.Second}},
-		WriteClientLimit:  []rateLimitRule{{limit: 1, window: time.Second}},
-		ReadIPRateLimit:   []rateLimitRule{{limit: 2, window: time.Second}},
-		ReadClientLimit:   []rateLimitRule{{limit: 2, window: time.Second}},
-		ChannelRateLimit:  []rateLimitRule{{limit: 10, window: time.Second}},
-		IPRateLimitRules:  []rateLimitRule{{limit: 10, window: time.Second}},
-		ClientRateLimit:   []rateLimitRule{{limit: 10, window: time.Second}},
+		WriteIPRateLimit: []rateLimitRule{{limit: 5, window: time.Second}},
+		WriteClientLimit: []rateLimitRule{{limit: 1, window: time.Second}},
+		ReadIPRateLimit:  []rateLimitRule{{limit: 2, window: time.Second}},
+		ReadClientLimit:  []rateLimitRule{{limit: 2, window: time.Second}},
+		ChannelRateLimit: []rateLimitRule{{limit: 10, window: time.Second}},
+		IPRateLimitRules: []rateLimitRule{{limit: 10, window: time.Second}},
+		ClientRateLimit:  []rateLimitRule{{limit: 10, window: time.Second}},
 	}
 
 	if !limiter.Allow("1.1.1.1", "user-a", "chan-1", "write", cfg) {
@@ -157,6 +158,32 @@ func TestRateLimiterAllowReadWriteByIPAndClient(t *testing.T) {
 	}
 	if limiter.Allow("2.2.2.2", "", "chan-3", "read", cfg) {
 		t.Fatal("third anonymous read should be blocked by read-ip rule")
+	}
+}
+
+func TestRateLimiterMaxKeys(t *testing.T) {
+	limiter := newRateLimiter(Config{RateLimitMaxKeys: 1})
+	cfg := Config{IPRateLimitRules: []rateLimitRule{{limit: 10, window: time.Second}}}
+
+	if !limiter.Allow("1.1.1.1", "", "chan-1", "read", cfg) {
+		t.Fatal("first key should pass")
+	}
+	if limiter.Allow("2.2.2.2", "", "chan-2", "read", cfg) {
+		t.Fatal("second key should be blocked by max keys")
+	}
+}
+
+func TestLogEventJSON(t *testing.T) {
+	buf := &bytes.Buffer{}
+	logger := log.New(buf, "", 0)
+	logEvent(logger, "json", "info", "sample", map[string]any{"channel": "c1"})
+
+	out := buf.String()
+	if !bytes.Contains([]byte(out), []byte(`"event":"sample"`)) {
+		t.Fatalf("unexpected log output: %s", out)
+	}
+	if !bytes.Contains([]byte(out), []byte(`"channel":"c1"`)) {
+		t.Fatalf("missing fields in log output: %s", out)
 	}
 }
 
