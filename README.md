@@ -117,12 +117,16 @@ The application uses `config.properties` for runtime configuration.
 Example configuration:
 
 ```properties
+server.port=700
+server.ssl.enabled=true
 authbackend.url=http://be.pandi.id:8080/PANDI-REGISTRAR-0.1/authRegistrar/
 backend.url=http://be.pandi.id:8080/PANDI-CORE-0.1/processepp/
 logoutbackend.url=http://be.pandi.id:8080/PANDI-REGISTRAR-0.1/logoutRegistrar/
 enable.validation=false
 idle.timeout.seconds=600
 tls.client.auth=REQUIRE
+logging.xml.full=false
+logging.xml.max.chars=512
 ratelimit.ip.rules=10/second,60/minute
 ratelimit.client.rules=50/second,500/minute
 ratelimit.channel.rules=10/second,60/minute
@@ -132,12 +136,16 @@ ratelimit.channel.rules=10/second,60/minute
 
 | Parameter | Description |
 |-----------|-------------|
+| `server.port` | Port listener EPP server (default `700`) |
+| `server.ssl.enabled` | Aktif/nonaktif TLS pada listener server |
 | `authbackend.url` | Registrar authentication API endpoint |
 | `backend.url` | Backend EPP command processing API endpoint |
 | `logoutbackend.url` | Registrar logout API endpoint |
 | `enable.validation` | Enable or disable XML/XSD validation |
 | `idle.timeout.seconds` | Idle session timeout in seconds |
 | `tls.client.auth` | TLS client certificate mode: `NONE`, `OPTIONAL`, or `REQUIRE` |
+| `logging.xml.full` | Jika `true`, log XML penuh (sudah masking pw/newPW) |
+| `logging.xml.max.chars` | Batas preview XML saat `logging.xml.full=false` |
 | `ratelimit.ip.rules` | Rate limit rules per client IP |
 | `ratelimit.client.rules` | Rate limit rules per authenticated client / registrar |
 | `ratelimit.channel.rules` | Rate limit rules per connection / channel |
