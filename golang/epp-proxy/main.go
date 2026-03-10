@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/binary"
 	"encoding/json"
 	"encoding/xml"
@@ -31,24 +32,30 @@ type Config struct {
 	FrontendTLS       bool
 	FrontendCert      string
 	FrontendKey       string
+	FrontendCA        string
+	TLSClientAuth     tls.ClientAuthType
 	AuthBackendURL    string
 	CommandBackendURL string
-	RateLimitMax      int
-	RateLimitWindow   time.Duration
-	RateLimitBy       string
+	LogoutBackendURL  string
+	IPRateLimitRules  []rateLimitRule
+	ClientRateLimit   []rateLimitRule
+	ChannelRateLimit  []rateLimitRule
+	MaxFrameSize      int
 }
 
 type rateLimiter struct {
-	max    int
-	window time.Duration
-
 	mu      sync.Mutex
-	buckets map[string]bucket
+	buckets map[string]map[string][]bucket
 }
 
 type bucket struct {
 	windowStart time.Time
 	count       int
+}
+
+type rateLimitRule struct {
+	limit  int
+	window time.Duration
 }
 
 type authRequest struct {
@@ -116,17 +123,24 @@ func main() {
 }
 
 func loadConfig() Config {
-	listen := flag.String("listen", envOr("EPP_LISTEN_ADDR", ":700"), "address to listen on")
-	connectTimeout := flag.Duration("connect-timeout", durationFromEnv("EPP_CONNECT_TIMEOUT", 5*time.Second), "backend connect timeout")
-	idleTimeout := flag.Duration("idle-timeout", durationFromEnv("EPP_IDLE_TIMEOUT", 10*time.Minute), "idle timeout for client connection")
-	frontendTLS := flag.Bool("frontend-tls", boolFromEnv("EPP_FRONTEND_TLS", false), "enable TLS listener")
-	frontendCert := flag.String("frontend-cert", envOr("EPP_FRONTEND_CERT", "certs/server.crt"), "TLS cert path")
-	frontendKey := flag.String("frontend-key", envOr("EPP_FRONTEND_KEY", "certs/server.key"), "TLS key path")
-	authURL := flag.String("auth-url", envOr("EPP_AUTH_URL", "http://localhost:8080/PANDI-REGISTRAR-0.1/authRegistrar/"), "backend auth URL")
-	commandURL := flag.String("command-url", envOr("EPP_COMMAND_URL", "http://localhost:8080/PANDI-CORE-0.1/processepp/"), "backend command URL")
-	rateLimitMax := flag.Int("rate-limit-max", intFromEnv("EPP_RATE_LIMIT_MAX", 10), "maximum EPP commands per rate-limit window")
-	rateLimitWindow := flag.Duration("rate-limit-window", durationFromEnv("EPP_RATE_LIMIT_WINDOW", time.Minute), "rate-limit window duration")
-	rateLimitBy := flag.String("rate-limit-by", strings.ToLower(envOr("EPP_RATE_LIMIT_BY", "ip_or_username")), "rate-limit key: ip, username, or ip_or_username")
+	envFile := discoverEnvFile()
+	loadDotEnv(envFile)
+
+	listen := flag.String("listen", resolveAddr(envOrFirst([]string{"SERVER_PORT", "EPP_SERVER_PORT", "EPP_LISTEN_ADDR"}, "700")), "address to listen on")
+	connectTimeout := flag.Duration("connect-timeout", durationWithFallback(envOr("EPP_CONNECT_TIMEOUT", "5s"), 5*time.Second), "backend connect timeout")
+	idleTimeout := flag.Duration("idle-timeout", durationWithFallback(envOrFirst([]string{"IDLE_TIMEOUT_SECONDS", "EPP_IDLE_TIMEOUT"}, "600"), 10*time.Minute), "idle timeout for client connection")
+	frontendTLS := flag.Bool("frontend-tls", boolWithFallback(envOrFirst([]string{"SERVER_SSL_ENABLED", "EPP_FRONTEND_TLS"}, "false"), false), "enable TLS listener")
+	frontendCert := flag.String("frontend-cert", envOrFirst([]string{"TLS_SERVER_CERT", "EPP_FRONTEND_CERT"}, "certs/server.crt"), "TLS cert path")
+	frontendKey := flag.String("frontend-key", envOrFirst([]string{"TLS_SERVER_KEY", "EPP_FRONTEND_KEY"}, "certs/server.key"), "TLS key path")
+	frontendCA := flag.String("frontend-ca", envOrFirst([]string{"TLS_CA_CERT", "EPP_FRONTEND_CA"}, "certs/cacert.pem"), "trusted client CA path")
+	tlsClientAuth := flag.String("tls-client-auth", strings.ToUpper(envOrFirst([]string{"TLS_CLIENT_AUTH", "EPP_TLS_CLIENT_AUTH"}, "REQUIRE")), "TLS client certificate mode: NONE, OPTIONAL, REQUIRE")
+	authURL := flag.String("auth-url", envOrFirst([]string{"AUTHBACKEND_URL", "EPP_AUTH_URL"}, "http://localhost:8080/PANDI-REGISTRAR-0.1/authRegistrar/"), "backend auth URL")
+	commandURL := flag.String("command-url", envOrFirst([]string{"BACKEND_URL", "EPP_COMMAND_URL"}, "http://localhost:8080/PANDI-CORE-0.1/processepp/"), "backend command URL")
+	logoutURL := flag.String("logout-url", envOrFirst([]string{"LOGOUTBACKEND_URL", "EPP_LOGOUT_URL"}, "http://localhost:8080/PANDI-REGISTRAR-0.1/logoutRegistrar/"), "backend logout URL")
+	rateLimitIP := flag.String("rate-limit-ip", envOrFirst([]string{"RATELIMIT_IP_RULES", "EPP_RATE_LIMIT_IP_RULES"}, "10/second,60/minute"), "rate limit rules by IP")
+	rateLimitClient := flag.String("rate-limit-client", envOrFirst([]string{"RATELIMIT_CLIENT_RULES", "EPP_RATE_LIMIT_CLIENT_RULES"}, "50/second,500/minute"), "rate limit rules by client ID")
+	rateLimitChannel := flag.String("rate-limit-channel", envOrFirst([]string{"RATELIMIT_CHANNEL_RULES", "EPP_RATE_LIMIT_CHANNEL_RULES"}, "10/second,60/minute"), "rate limit rules by channel")
+	maxFrameSize := flag.Int("max-frame-size", intWithFallback(envOr("EPP_MAX_FRAME_BYTES", "65535"), 65535), "maximum RFC5734 frame size in bytes")
 	flag.Parse()
 
 	return Config{
@@ -136,11 +150,15 @@ func loadConfig() Config {
 		FrontendTLS:       *frontendTLS,
 		FrontendCert:      *frontendCert,
 		FrontendKey:       *frontendKey,
+		FrontendCA:        *frontendCA,
+		TLSClientAuth:     parseTLSClientAuth(*tlsClientAuth),
 		AuthBackendURL:    *authURL,
 		CommandBackendURL: *commandURL,
-		RateLimitMax:      *rateLimitMax,
-		RateLimitWindow:   *rateLimitWindow,
-		RateLimitBy:       strings.ToLower(*rateLimitBy),
+		LogoutBackendURL:  *logoutURL,
+		IPRateLimitRules:  parseRateLimitRules(*rateLimitIP),
+		ClientRateLimit:   parseRateLimitRules(*rateLimitClient),
+		ChannelRateLimit:  parseRateLimitRules(*rateLimitChannel),
+		MaxFrameSize:      *maxFrameSize,
 	}
 }
 
@@ -154,7 +172,20 @@ func buildListener(cfg Config) (net.Listener, error) {
 		return nil, err
 	}
 
-	tlsCfg := &tls.Config{Certificates: []tls.Certificate{certificate}}
+	tlsCfg := &tls.Config{Certificates: []tls.Certificate{certificate}, ClientAuth: cfg.TLSClientAuth, MinVersion: tls.VersionTLS12}
+
+	if cfg.TLSClientAuth != tls.NoClientCert {
+		caBytes, err := os.ReadFile(cfg.FrontendCA)
+		if err != nil {
+			return nil, err
+		}
+		caPool := x509.NewCertPool()
+		if !caPool.AppendCertsFromPEM(caBytes) {
+			return nil, fmt.Errorf("invalid CA certificate in %s", cfg.FrontendCA)
+		}
+		tlsCfg.ClientCAs = caPool
+	}
+
 	return tls.Listen("tcp", cfg.ListenAddr, tlsCfg)
 }
 
@@ -177,7 +208,7 @@ func handleConn(cfg Config, logger *log.Logger, limiter *rateLimiter, client net
 
 	for {
 		_ = client.SetReadDeadline(time.Now().Add(cfg.IdleTimeout))
-		payload, err := readEPPPayload(reader)
+		payload, err := readEPPPayload(reader, cfg.MaxFrameSize)
 		if err != nil {
 			if !errors.Is(err, io.EOF) {
 				logger.Printf("[%s] read error: %v", clientID, err)
@@ -189,8 +220,8 @@ func handleConn(cfg Config, logger *log.Logger, limiter *rateLimiter, client net
 			username = extracted
 		}
 
-		if !limiter.Allow(remoteAddr, username, cfg.RateLimitBy) {
-			logger.Printf("[%s] rate limit exceeded for key=%s", client.RemoteAddr(), limiter.Key(remoteAddr, username, cfg.RateLimitBy))
+		if !limiter.Allow(remoteAddr, username, clientID, cfg) {
+			logger.Printf("[%s] rate limit exceeded", client.RemoteAddr())
 			if err = writeEPPPayload(client, buildRateLimitExceededResponse()); err != nil {
 				logger.Printf("[%s] write rate-limit response failed: %v", clientID, err)
 			}
@@ -324,54 +355,61 @@ func extractClTRID(payload []byte) string {
 }
 
 func newRateLimiter(cfg Config) *rateLimiter {
-	return &rateLimiter{max: cfg.RateLimitMax, window: cfg.RateLimitWindow, buckets: make(map[string]bucket)}
+	return &rateLimiter{buckets: make(map[string]map[string][]bucket)}
 }
 
-func (r *rateLimiter) Allow(ip, username, mode string) bool {
-	if r.max <= 0 {
-		return true
-	}
-
-	key := r.Key(ip, username, mode)
+func (r *rateLimiter) Allow(ip, username, channelID string, cfg Config) bool {
 	now := time.Now()
 
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	b := r.buckets[key]
-	if b.windowStart.IsZero() || now.Sub(b.windowStart) >= r.window {
-		b = bucket{windowStart: now, count: 1}
-		r.buckets[key] = b
-		return true
-	}
-
-	if b.count >= r.max {
+	if !r.allowForScope("ip", ip, cfg.IPRateLimitRules, now) {
 		return false
 	}
+	if username != "" && !r.allowForScope("client", username, cfg.ClientRateLimit, now) {
+		return false
+	}
+	return r.allowForScope("channel", channelID, cfg.ChannelRateLimit, now)
+}
 
-	b.count++
-	r.buckets[key] = b
+func (r *rateLimiter) allowForScope(scope, key string, rules []rateLimitRule, now time.Time) bool {
+	if len(rules) == 0 {
+		return true
+	}
+	scopeBuckets, ok := r.buckets[scope]
+	if !ok {
+		scopeBuckets = map[string][]bucket{}
+		r.buckets[scope] = scopeBuckets
+	}
+
+	buckets := scopeBuckets[key]
+	if len(buckets) != len(rules) {
+		buckets = make([]bucket, len(rules))
+	}
+
+	for idx, rule := range rules {
+		if rule.limit <= 0 {
+			continue
+		}
+		b := buckets[idx]
+		if b.windowStart.IsZero() || now.Sub(b.windowStart) >= rule.window {
+			buckets[idx] = bucket{windowStart: now, count: 1}
+			continue
+		}
+		if b.count >= rule.limit {
+			scopeBuckets[key] = buckets
+			return false
+		}
+		b.count++
+		buckets[idx] = b
+	}
+
+	scopeBuckets[key] = buckets
 	return true
 }
 
-func (r *rateLimiter) Key(ip, username, mode string) string {
-	switch strings.ToLower(mode) {
-	case "username":
-		if username != "" {
-			return "user:" + username
-		}
-		return "ip:" + ip
-	case "ip":
-		return "ip:" + ip
-	default:
-		if username != "" {
-			return "user:" + username
-		}
-		return "ip:" + ip
-	}
-}
-
-func readEPPPayload(reader *bufio.Reader) ([]byte, error) {
+func readEPPPayload(reader *bufio.Reader, maxFrameSize int) ([]byte, error) {
 	header := make([]byte, 4)
 	if _, err := io.ReadFull(reader, header); err != nil {
 		return nil, err
@@ -380,6 +418,9 @@ func readEPPPayload(reader *bufio.Reader) ([]byte, error) {
 	totalLen := binary.BigEndian.Uint32(header)
 	if totalLen < 5 {
 		return nil, fmt.Errorf("invalid epp frame length: %d", totalLen)
+	}
+	if maxFrameSize > 0 && totalLen > uint32(maxFrameSize) {
+		return nil, fmt.Errorf("frame too large: %d > %d", totalLen, maxFrameSize)
 	}
 
 	payload := make([]byte, totalLen-4)
@@ -443,6 +484,158 @@ func envOr(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+func envOrFirst(keys []string, fallback string) string {
+	for _, key := range keys {
+		if v := strings.TrimSpace(os.Getenv(key)); v != "" {
+			return v
+		}
+	}
+	return fallback
+}
+
+func discoverEnvFile() string {
+	quick := flag.NewFlagSet("quick", flag.ContinueOnError)
+	quick.SetOutput(io.Discard)
+	pathFlag := quick.String("env-file", envOr("EPP_ENV_FILE", ".env"), "env file")
+	_ = quick.Parse(os.Args[1:])
+	return *pathFlag
+}
+
+func loadDotEnv(path string) {
+	content, err := os.ReadFile(path)
+	if err != nil {
+		return
+	}
+
+	for _, line := range strings.Split(string(content), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		sep := strings.Index(line, "=")
+		if sep <= 0 {
+			continue
+		}
+		key := strings.TrimSpace(line[:sep])
+		value := strings.TrimSpace(line[sep+1:])
+		value = strings.Trim(value, "\"'")
+		if key == "" {
+			continue
+		}
+		if _, exists := os.LookupEnv(key); exists {
+			continue
+		}
+		_ = os.Setenv(key, value)
+	}
+}
+
+func resolveAddr(portOrAddr string) string {
+	v := strings.TrimSpace(portOrAddr)
+	if v == "" {
+		return ":700"
+	}
+	if strings.Contains(v, ":") {
+		return v
+	}
+	return ":" + v
+}
+
+func durationWithFallback(value string, fallback time.Duration) time.Duration {
+	v := strings.TrimSpace(value)
+	if v == "" {
+		return fallback
+	}
+	if d, err := time.ParseDuration(v); err == nil {
+		return d
+	}
+	if sec, err := strconv.Atoi(v); err == nil {
+		return time.Duration(sec) * time.Second
+	}
+	return fallback
+}
+
+func boolWithFallback(value string, fallback bool) bool {
+	v := strings.ToLower(strings.TrimSpace(value))
+	switch v {
+	case "1", "true", "yes":
+		return true
+	case "0", "false", "no":
+		return false
+	default:
+		return fallback
+	}
+}
+
+func intWithFallback(value string, fallback int) int {
+	i, err := strconv.Atoi(strings.TrimSpace(value))
+	if err != nil {
+		return fallback
+	}
+	return i
+}
+
+func parseRateLimitRules(raw string) []rateLimitRule {
+	parts := strings.Split(raw, ",")
+	rules := make([]rateLimitRule, 0, len(parts))
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			continue
+		}
+		lr := strings.SplitN(p, "/", 2)
+		if len(lr) != 2 {
+			continue
+		}
+		limit, err := strconv.Atoi(strings.TrimSpace(lr[0]))
+		if err != nil || limit <= 0 {
+			continue
+		}
+		window, ok := parseRateLimitWindow(strings.TrimSpace(lr[1]))
+		if !ok {
+			continue
+		}
+		rules = append(rules, rateLimitRule{limit: limit, window: window})
+	}
+	return rules
+}
+
+func parseRateLimitWindow(raw string) (time.Duration, bool) {
+	v := strings.ToLower(strings.TrimSpace(raw))
+	if v == "" {
+		return 0, false
+	}
+	if d, err := time.ParseDuration(v); err == nil && d > 0 {
+		return d, true
+	}
+	units := map[string]time.Duration{
+		"second":  time.Second,
+		"seconds": time.Second,
+		"minute":  time.Minute,
+		"minutes": time.Minute,
+		"hour":    time.Hour,
+		"hours":   time.Hour,
+	}
+	if d, ok := units[v]; ok {
+		return d, true
+	}
+	return 0, false
+}
+
+func parseTLSClientAuth(mode string) tls.ClientAuthType {
+	switch strings.ToUpper(strings.TrimSpace(mode)) {
+	case "NONE":
+		return tls.NoClientCert
+	case "OPTIONAL":
+		return tls.VerifyClientCertIfGiven
+	default:
+		return tls.RequireAndVerifyClientCert
+	}
+}
+
+func init() {
+	flag.String("env-file", envOr("EPP_ENV_FILE", ".env"), "path to .env configuration")
 }
 
 func boolFromEnv(key string, fallback bool) bool {
