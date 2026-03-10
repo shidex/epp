@@ -1,8 +1,6 @@
 # Go EPP TCP Proxy (HTTP Backend Bridge)
 
-Service Go ini membuka **port TCP EPP** (default `:700`), menerima frame EPP dari registrar, lalu meneruskan request ke backend HTTP seperti implementasi Java.
-
-`config.properties` Java dipakai sebagai **referensi mapping saja**. Runtime Go membaca konfigurasi dari file `.env`.
+Service Go ini membuka **port TCP EPP** (default `:700`), menerima frame EPP dari registrar, lalu meneruskan request ke backend HTTP.
 
 ## Fitur penting
 - Parsing frame EPP RFC5734 dengan validasi panjang frame (`EPP_MAX_FRAME_BYTES`).
