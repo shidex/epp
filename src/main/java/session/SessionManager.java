@@ -112,10 +112,14 @@ public class SessionManager {
     public static boolean isPostLoginRateLimited(String ip, Channel channel) {
         SessionContext ctx = getSessionByChannel(channel);
         String clientId = ctx != null ? ctx.getClientId() : null;
-        return RateLimiter.isRateLimited(ip, clientId, channel);
+        return RateLimiter.isRateLimited(ip, clientId, channel, true);
     }
 
     public static boolean isRateLimited(String ip, String clientId, Channel channel) {
         return RateLimiter.isRateLimited(ip, clientId, channel);
+    }
+
+    public static boolean isRateLimited(String ip, String clientId, Channel channel, boolean writeCommand) {
+        return RateLimiter.isRateLimited(ip, clientId, channel, writeCommand);
     }
 }

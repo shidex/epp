@@ -25,15 +25,27 @@ public class RateLimiter {
     private static final List<RateLimitRule> IP_RULES;
     private static final List<RateLimitRule> CLIENT_RULES;
     private static final List<RateLimitRule> CHANNEL_RULES;
+    private static final List<RateLimitRule> READ_IP_RULES;
+    private static final List<RateLimitRule> WRITE_IP_RULES;
+    private static final List<RateLimitRule> READ_CLIENT_RULES;
+    private static final List<RateLimitRule> WRITE_CLIENT_RULES;
 
     static {
         IP_RULES = loadRules("ratelimit.ip.rules", "20/second,100/minute");
         CLIENT_RULES = loadRules("ratelimit.client.rules", "50/second,500/minute");
         CHANNEL_RULES = loadRules("ratelimit.channel.rules", "10/second,60/minute");
+        READ_IP_RULES = loadRules("ratelimit.read.ip.rules", ConfigLoader.get("ratelimit.ip.rules", "20/second,100/minute"));
+        WRITE_IP_RULES = loadRules("ratelimit.write.ip.rules", ConfigLoader.get("ratelimit.ip.rules", "20/second,100/minute"));
+        READ_CLIENT_RULES = loadRules("ratelimit.read.client.rules", ConfigLoader.get("ratelimit.client.rules", "50/second,500/minute"));
+        WRITE_CLIENT_RULES = loadRules("ratelimit.write.client.rules", ConfigLoader.get("ratelimit.client.rules", "50/second,500/minute"));
 
         System.out.println("[RATE LIMIT] Loaded IP rules      : " + IP_RULES);
         System.out.println("[RATE LIMIT] Loaded CLIENT rules  : " + CLIENT_RULES);
         System.out.println("[RATE LIMIT] Loaded CHANNEL rules : " + CHANNEL_RULES);
+        System.out.println("[RATE LIMIT] Loaded READ IP rules : " + READ_IP_RULES);
+        System.out.println("[RATE LIMIT] Loaded WRITE IP rules: " + WRITE_IP_RULES);
+        System.out.println("[RATE LIMIT] Loaded READ CLIENT rules : " + READ_CLIENT_RULES);
+        System.out.println("[RATE LIMIT] Loaded WRITE CLIENT rules: " + WRITE_CLIENT_RULES);
     }
 
     private RateLimiter() {
@@ -73,6 +85,10 @@ public class RateLimiter {
     }
 
     public static boolean isRateLimited(String ip, String clientId, Channel channel) {
+        return isRateLimited(ip, clientId, channel, true);
+    }
+
+    public static boolean isRateLimited(String ip, String clientId, Channel channel, boolean writeCommand) {
         if (isIpRateLimited(ip)) {
             return true;
         }
@@ -85,7 +101,35 @@ public class RateLimiter {
             return true;
         }
 
+        if (isReadWriteIpRateLimited(ip, writeCommand)) {
+            return true;
+        }
+
+        if (clientId != null && !clientId.trim().isEmpty() && isReadWriteClientRateLimited(clientId, writeCommand)) {
+            return true;
+        }
+
         return false;
+    }
+
+    private static boolean isReadWriteIpRateLimited(String ip, boolean writeCommand) {
+        if (ip == null || ip.trim().isEmpty()) {
+            return false;
+        }
+
+        List<RateLimitRule> rules = writeCommand ? WRITE_IP_RULES : READ_IP_RULES;
+        String scope = writeCommand ? "WRITE-IP" : "READ-IP";
+        return isRateLimited(ipRequestMap, "rw-ip:" + scope + ":" + ip, rules, scope);
+    }
+
+    private static boolean isReadWriteClientRateLimited(String clientId, boolean writeCommand) {
+        if (clientId == null || clientId.trim().isEmpty()) {
+            return false;
+        }
+
+        List<RateLimitRule> rules = writeCommand ? WRITE_CLIENT_RULES : READ_CLIENT_RULES;
+        String scope = writeCommand ? "WRITE-CLIENT" : "READ-CLIENT";
+        return isRateLimited(clientRequestMap, "rw-client:" + scope + ":" + clientId, rules, scope);
     }
 
     public static void removeChannel(Channel channel) {
