@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"crypto/tls"
 	"encoding/binary"
 	"net"
 	"net/http"
@@ -24,78 +25,79 @@ func TestEnvOr(t *testing.T) {
 	}
 }
 
-func TestBoolFromEnv(t *testing.T) {
-	t.Setenv("TEST_BOOL", "true")
-	if !boolFromEnv("TEST_BOOL", false) {
-		t.Fatal("expected true")
-	}
-
-	t.Setenv("TEST_BOOL", "no")
-	if boolFromEnv("TEST_BOOL", true) {
-		t.Fatal("expected false")
-	}
-
-	_ = os.Unsetenv("TEST_BOOL")
-	if !boolFromEnv("TEST_BOOL", true) {
-		t.Fatal("expected fallback true")
+func TestEnvOrFirst(t *testing.T) {
+	t.Setenv("A_EMPTY", "")
+	t.Setenv("B_VAL", "hello")
+	if got := envOrFirst([]string{"A_EMPTY", "B_VAL"}, "fallback"); got != "hello" {
+		t.Fatalf("expected hello, got %q", got)
 	}
 }
 
-func TestDurationFromEnv(t *testing.T) {
-	t.Setenv("TEST_DURATION", "7s")
-	if got := durationFromEnv("TEST_DURATION", 2*time.Second); got != 7*time.Second {
-		t.Fatalf("expected 7s, got %v", got)
+func TestLoadDotEnv(t *testing.T) {
+	dir := t.TempDir()
+	envPath := dir + "/.env"
+	content := "SERVER_PORT=700\nTLS_CLIENT_AUTH=OPTIONAL\n#comment\n"
+	if err := os.WriteFile(envPath, []byte(content), 0o644); err != nil {
+		t.Fatalf("write env failed: %v", err)
 	}
+	_ = os.Unsetenv("SERVER_PORT")
+	_ = os.Unsetenv("TLS_CLIENT_AUTH")
 
-	t.Setenv("TEST_DURATION", "invalid")
-	if got := durationFromEnv("TEST_DURATION", 2*time.Second); got != 2*time.Second {
-		t.Fatalf("expected fallback 2s, got %v", got)
+	loadDotEnv(envPath)
+
+	if got := os.Getenv("SERVER_PORT"); got != "700" {
+		t.Fatalf("expected SERVER_PORT=700 got %q", got)
+	}
+	if got := os.Getenv("TLS_CLIENT_AUTH"); got != "OPTIONAL" {
+		t.Fatalf("expected TLS_CLIENT_AUTH=OPTIONAL got %q", got)
 	}
 }
 
-func TestIntFromEnv(t *testing.T) {
-	t.Setenv("TEST_INT", "42")
-	if got := intFromEnv("TEST_INT", 10); got != 42 {
-		t.Fatalf("expected 42, got %d", got)
+func TestParseRateLimitRules(t *testing.T) {
+	rules := parseRateLimitRules("10/second,60/minute")
+	if len(rules) != 2 {
+		t.Fatalf("expected 2 rules, got %d", len(rules))
 	}
+	if rules[0].limit != 10 || rules[0].window != time.Second {
+		t.Fatalf("unexpected first rule: %+v", rules[0])
+	}
+	if rules[1].limit != 60 || rules[1].window != time.Minute {
+		t.Fatalf("unexpected second rule: %+v", rules[1])
+	}
+}
 
-	t.Setenv("TEST_INT", "bad")
-	if got := intFromEnv("TEST_INT", 10); got != 10 {
-		t.Fatalf("expected fallback 10, got %d", got)
+func TestParseTLSClientAuth(t *testing.T) {
+	if got := parseTLSClientAuth("NONE"); got != tls.NoClientCert {
+		t.Fatalf("unexpected client auth for NONE: %v", got)
+	}
+	if got := parseTLSClientAuth("OPTIONAL"); got != tls.VerifyClientCertIfGiven {
+		t.Fatalf("unexpected client auth for OPTIONAL: %v", got)
+	}
+	if got := parseTLSClientAuth("REQUIRE"); got != tls.RequireAndVerifyClientCert {
+		t.Fatalf("unexpected client auth for REQUIRE: %v", got)
 	}
 }
 
 func TestRateLimiterAllow(t *testing.T) {
-	limiter := &rateLimiter{max: 2, window: 50 * time.Millisecond, buckets: make(map[string]bucket)}
-	if !limiter.Allow("1.1.1.1", "", "ip") {
+	limiter := newRateLimiter(Config{})
+	cfg := Config{
+		IPRateLimitRules: []rateLimitRule{{limit: 2, window: 50 * time.Millisecond}},
+		ChannelRateLimit: []rateLimitRule{{limit: 2, window: 50 * time.Millisecond}},
+	}
+
+	if !limiter.Allow("1.1.1.1", "", "chan-1", cfg) {
 		t.Fatal("first request should pass")
 	}
-	if !limiter.Allow("1.1.1.1", "", "ip") {
+	if !limiter.Allow("1.1.1.1", "", "chan-1", cfg) {
 		t.Fatal("second request should pass")
 	}
-	if limiter.Allow("1.1.1.1", "", "ip") {
+	if limiter.Allow("1.1.1.1", "", "chan-1", cfg) {
 		t.Fatal("third request should be blocked")
 	}
 
 	time.Sleep(60 * time.Millisecond)
-	if !limiter.Allow("1.1.1.1", "", "ip") {
+	if !limiter.Allow("1.1.1.1", "", "chan-1", cfg) {
 		t.Fatal("request should pass after window reset")
-	}
-}
-
-func TestRateLimiterKey(t *testing.T) {
-	limiter := &rateLimiter{}
-	if got := limiter.Key("2.2.2.2", "alice", "username"); got != "user:alice" {
-		t.Fatalf("unexpected username key: %s", got)
-	}
-	if got := limiter.Key("2.2.2.2", "", "username"); got != "ip:2.2.2.2" {
-		t.Fatalf("unexpected username fallback key: %s", got)
-	}
-	if got := limiter.Key("2.2.2.2", "alice", "ip"); got != "ip:2.2.2.2" {
-		t.Fatalf("unexpected ip key: %s", got)
-	}
-	if got := limiter.Key("2.2.2.2", "alice", "ip_or_username"); got != "user:alice" {
-		t.Fatalf("unexpected default key: %s", got)
 	}
 }
 
@@ -130,7 +132,7 @@ func TestReadWriteEPPPayload(t *testing.T) {
 		errCh <- writeEPPPayload(server, []byte("<epp/>"))
 	}()
 
-	payload, err := readEPPPayload(bufio.NewReader(client))
+	payload, err := readEPPPayload(bufio.NewReader(client), 1024)
 	if err != nil {
 		t.Fatalf("readEPPPayload failed: %v", err)
 	}
@@ -145,9 +147,19 @@ func TestReadWriteEPPPayload(t *testing.T) {
 func TestReadEPPPayloadInvalidLength(t *testing.T) {
 	buf := new(bytes.Buffer)
 	_ = binary.Write(buf, binary.BigEndian, uint32(4))
-	_, err := readEPPPayload(bufio.NewReader(bytes.NewReader(buf.Bytes())))
+	_, err := readEPPPayload(bufio.NewReader(bytes.NewReader(buf.Bytes())), 1024)
 	if err == nil {
 		t.Fatal("expected invalid frame length error")
+	}
+}
+
+func TestReadEPPPayloadTooLarge(t *testing.T) {
+	buf := new(bytes.Buffer)
+	_ = binary.Write(buf, binary.BigEndian, uint32(2048))
+	buf.Write(make([]byte, 2044))
+	_, err := readEPPPayload(bufio.NewReader(bytes.NewReader(buf.Bytes())), 1024)
+	if err == nil {
+		t.Fatal("expected frame too large error")
 	}
 }
 
