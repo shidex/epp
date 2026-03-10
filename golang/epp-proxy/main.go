@@ -26,31 +26,37 @@ import (
 )
 
 type Config struct {
-	ListenAddr        string
-	ConnectTimeout    time.Duration
-	IdleTimeout       time.Duration
-	WriteTimeout      time.Duration
-	FrontendTLS       bool
-	FrontendCert      string
-	FrontendKey       string
-	FrontendCA        string
-	TLSClientAuth     tls.ClientAuthType
-	AuthBackendURL    string
-	CommandBackendURL string
-	LogoutBackendURL  string
-	IPRateLimitRules  []rateLimitRule
-	ClientRateLimit   []rateLimitRule
-	ChannelRateLimit  []rateLimitRule
-	WriteRateLimit    []rateLimitRule
-	ReadRateLimit     []rateLimitRule
-	ReadIPRateLimit   []rateLimitRule
-	WriteIPRateLimit  []rateLimitRule
-	ReadClientLimit   []rateLimitRule
-	WriteClientLimit  []rateLimitRule
-	MaxFrameSize      int
-	MaxConns          int
-	RateLimitMaxKeys  int
-	LogFormat         string
+	ListenAddr                 string
+	BackendTimeout             time.Duration
+	BackendDialTimeout         time.Duration
+	BackendTLSHandshake        time.Duration
+	BackendIdleConnTimeout     time.Duration
+	IdleTimeout                time.Duration
+	WriteTimeout               time.Duration
+	FrontendTLS                bool
+	FrontendCert               string
+	FrontendKey                string
+	FrontendCA                 string
+	TLSClientAuth              tls.ClientAuthType
+	AuthBackendURL             string
+	CommandBackendURL          string
+	LogoutBackendURL           string
+	IPRateLimitRules           []rateLimitRule
+	ClientRateLimit            []rateLimitRule
+	ChannelRateLimit           []rateLimitRule
+	WriteRateLimit             []rateLimitRule
+	ReadRateLimit              []rateLimitRule
+	ReadIPRateLimit            []rateLimitRule
+	WriteIPRateLimit           []rateLimitRule
+	ReadClientLimit            []rateLimitRule
+	WriteClientLimit           []rateLimitRule
+	MaxFrameSize               int
+	MaxConns                   int
+	RateLimitMaxKeys           int
+	BackendMaxIdleConns        int
+	BackendMaxIdleConnsPerHost int
+	BackendMaxConnsPerHost     int
+	LogFormat                  string
 }
 
 type rateLimiter struct {
@@ -103,6 +109,7 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 	limiter := newRateLimiter(cfg)
+	httpClient := newBackendHTTPClient(cfg)
 	connSlots := make(chan struct{}, max(1, cfg.MaxConns))
 
 	logEvent(logger, cfg.LogFormat, "info", "service_started", map[string]any{"listen_addr": cfg.ListenAddr, "auth_url": cfg.AuthBackendURL, "command_url": cfg.CommandBackendURL, "max_conns": cfg.MaxConns})
@@ -134,7 +141,7 @@ func main() {
 		go func(client net.Conn) {
 			defer wg.Done()
 			defer func() { <-connSlots }()
-			handleConn(cfg, logger, limiter, client)
+			handleConn(cfg, logger, limiter, httpClient, client)
 		}(conn)
 	}
 
@@ -148,7 +155,10 @@ func loadConfig() Config {
 	loadDotEnv(envFile)
 
 	listen := flag.String("listen", resolveAddr(envOrFirst([]string{"SERVER_PORT", "EPP_SERVER_PORT", "EPP_LISTEN_ADDR"}, "700")), "address to listen on")
-	connectTimeout := flag.Duration("connect-timeout", durationWithFallback(envOr("EPP_CONNECT_TIMEOUT", "5s"), 5*time.Second), "backend connect timeout")
+	backendTimeout := flag.Duration("backend-timeout", durationWithFallback(envOr("EPP_BACKEND_TIMEOUT", "15s"), 15*time.Second), "overall backend HTTP timeout")
+	backendDialTimeout := flag.Duration("backend-dial-timeout", durationWithFallback(envOrFirst([]string{"EPP_BACKEND_DIAL_TIMEOUT", "EPP_CONNECT_TIMEOUT"}, "5s"), 5*time.Second), "backend dial timeout")
+	backendTLSHandshake := flag.Duration("backend-tls-timeout", durationWithFallback(envOr("EPP_BACKEND_TLS_HANDSHAKE_TIMEOUT", "3s"), 3*time.Second), "backend TLS handshake timeout")
+	backendIdleConnTimeout := flag.Duration("backend-idle-conn-timeout", durationWithFallback(envOr("EPP_BACKEND_IDLE_CONN_TIMEOUT", "90s"), 90*time.Second), "backend idle keep-alive connection timeout")
 	idleTimeout := flag.Duration("idle-timeout", durationWithFallback(envOrFirst([]string{"IDLE_TIMEOUT_SECONDS", "EPP_IDLE_TIMEOUT"}, "600"), 10*time.Minute), "idle timeout for client connection")
 	writeTimeout := flag.Duration("write-timeout", durationWithFallback(envOr("EPP_WRITE_TIMEOUT", "10s"), 10*time.Second), "write timeout for client connection")
 	frontendTLS := flag.Bool("frontend-tls", boolWithFallback(envOrFirst([]string{"SERVER_SSL_ENABLED", "EPP_FRONTEND_TLS"}, "false"), false), "enable TLS listener")
@@ -171,36 +181,64 @@ func loadConfig() Config {
 	maxFrameSize := flag.Int("max-frame-size", intWithFallback(envOr("EPP_MAX_FRAME_BYTES", "65535"), 65535), "maximum RFC5734 frame size in bytes")
 	maxConns := flag.Int("max-conns", intWithFallback(envOr("EPP_MAX_CONNS", "1000"), 1000), "maximum concurrent accepted connections")
 	rateLimitMaxKeys := flag.Int("rate-limit-max-keys", intWithFallback(envOr("EPP_RATELIMIT_MAX_KEYS", "100000"), 100000), "maximum tracked keys per rate limiter scope")
+	backendMaxIdleConns := flag.Int("backend-max-idle-conns", intWithFallback(envOr("EPP_BACKEND_MAX_IDLE_CONNS", "2048"), 2048), "maximum idle backend HTTP connections")
+	backendMaxIdleConnsPerHost := flag.Int("backend-max-idle-conns-per-host", intWithFallback(envOr("EPP_BACKEND_MAX_IDLE_CONNS_PER_HOST", "1024"), 1024), "maximum idle backend HTTP connections per host")
+	backendMaxConnsPerHost := flag.Int("backend-max-conns-per-host", intWithFallback(envOr("EPP_BACKEND_MAX_CONNS_PER_HOST", "0"), 0), "maximum total backend HTTP connections per host; 0 means unlimited")
 	logFormat := flag.String("log-format", strings.ToLower(envOr("EPP_LOG_FORMAT", "json")), "log format: json or text")
 	flag.Parse()
 
 	return Config{
-		ListenAddr:        *listen,
-		ConnectTimeout:    *connectTimeout,
-		IdleTimeout:       *idleTimeout,
-		WriteTimeout:      *writeTimeout,
-		FrontendTLS:       *frontendTLS,
-		FrontendCert:      *frontendCert,
-		FrontendKey:       *frontendKey,
-		FrontendCA:        *frontendCA,
-		TLSClientAuth:     parseTLSClientAuth(*tlsClientAuth),
-		AuthBackendURL:    *authURL,
-		CommandBackendURL: *commandURL,
-		LogoutBackendURL:  *logoutURL,
-		IPRateLimitRules:  parseRateLimitRules(*rateLimitIP),
-		ClientRateLimit:   parseRateLimitRules(*rateLimitClient),
-		ChannelRateLimit:  parseRateLimitRules(*rateLimitChannel),
-		WriteRateLimit:    parseRateLimitRules(*rateLimitWrite),
-		ReadRateLimit:     parseRateLimitRules(*rateLimitRead),
-		ReadIPRateLimit:   parseRateLimitRules(*rateLimitReadIP),
-		WriteIPRateLimit:  parseRateLimitRules(*rateLimitWriteIP),
-		ReadClientLimit:   parseRateLimitRules(*rateLimitReadClient),
-		WriteClientLimit:  parseRateLimitRules(*rateLimitWriteClient),
-		MaxFrameSize:      *maxFrameSize,
-		MaxConns:          *maxConns,
-		RateLimitMaxKeys:  *rateLimitMaxKeys,
-		LogFormat:         *logFormat,
+		ListenAddr:                 *listen,
+		BackendTimeout:             *backendTimeout,
+		BackendDialTimeout:         *backendDialTimeout,
+		BackendTLSHandshake:        *backendTLSHandshake,
+		BackendIdleConnTimeout:     *backendIdleConnTimeout,
+		IdleTimeout:                *idleTimeout,
+		WriteTimeout:               *writeTimeout,
+		FrontendTLS:                *frontendTLS,
+		FrontendCert:               *frontendCert,
+		FrontendKey:                *frontendKey,
+		FrontendCA:                 *frontendCA,
+		TLSClientAuth:              parseTLSClientAuth(*tlsClientAuth),
+		AuthBackendURL:             *authURL,
+		CommandBackendURL:          *commandURL,
+		LogoutBackendURL:           *logoutURL,
+		IPRateLimitRules:           parseRateLimitRules(*rateLimitIP),
+		ClientRateLimit:            parseRateLimitRules(*rateLimitClient),
+		ChannelRateLimit:           parseRateLimitRules(*rateLimitChannel),
+		WriteRateLimit:             parseRateLimitRules(*rateLimitWrite),
+		ReadRateLimit:              parseRateLimitRules(*rateLimitRead),
+		ReadIPRateLimit:            parseRateLimitRules(*rateLimitReadIP),
+		WriteIPRateLimit:           parseRateLimitRules(*rateLimitWriteIP),
+		ReadClientLimit:            parseRateLimitRules(*rateLimitReadClient),
+		WriteClientLimit:           parseRateLimitRules(*rateLimitWriteClient),
+		MaxFrameSize:               *maxFrameSize,
+		MaxConns:                   *maxConns,
+		RateLimitMaxKeys:           *rateLimitMaxKeys,
+		BackendMaxIdleConns:        *backendMaxIdleConns,
+		BackendMaxIdleConnsPerHost: *backendMaxIdleConnsPerHost,
+		BackendMaxConnsPerHost:     *backendMaxConnsPerHost,
+		LogFormat:                  *logFormat,
 	}
+}
+
+func newBackendHTTPClient(cfg Config) *http.Client {
+	transport := &http.Transport{
+		Proxy: http.ProxyFromEnvironment,
+		DialContext: (&net.Dialer{
+			Timeout:   cfg.BackendDialTimeout,
+			KeepAlive: 30 * time.Second,
+		}).DialContext,
+		ForceAttemptHTTP2:     true,
+		MaxIdleConns:          max(1, cfg.BackendMaxIdleConns),
+		MaxIdleConnsPerHost:   max(1, cfg.BackendMaxIdleConnsPerHost),
+		MaxConnsPerHost:       max(0, cfg.BackendMaxConnsPerHost),
+		IdleConnTimeout:       cfg.BackendIdleConnTimeout,
+		TLSHandshakeTimeout:   cfg.BackendTLSHandshake,
+		ExpectContinueTimeout: time.Second,
+	}
+
+	return &http.Client{Timeout: cfg.BackendTimeout, Transport: transport}
 }
 
 func buildListener(cfg Config) (net.Listener, error) {
@@ -230,11 +268,10 @@ func buildListener(cfg Config) (net.Listener, error) {
 	return tls.Listen("tcp", cfg.ListenAddr, tlsCfg)
 }
 
-func handleConn(cfg Config, logger *log.Logger, limiter *rateLimiter, client net.Conn) {
+func handleConn(cfg Config, logger *log.Logger, limiter *rateLimiter, httpClient *http.Client, client net.Conn) {
 	defer client.Close()
 	clientID := client.RemoteAddr().String()
 	remoteAddr := remoteIP(client.RemoteAddr())
-	httpClient := &http.Client{Timeout: cfg.ConnectTimeout}
 
 	logEvent(logger, cfg.LogFormat, "info", "client_connected", map[string]any{"channel": clientID, "remote_ip": remoteAddr})
 	if err := writeEPPPayload(client, []byte(buildGreetingResponse())); err != nil {
@@ -255,10 +292,6 @@ func handleConn(cfg Config, logger *log.Logger, limiter *rateLimiter, client net
 				logEvent(logger, cfg.LogFormat, "warn", "read_failed", map[string]any{"channel": clientID, "error": err.Error()})
 			}
 			return
-		}
-
-		if extracted := extractEPPUsername(payload); extracted != "" {
-			username = extracted
 		}
 
 		commandType := classifyCommandType(payload)
@@ -583,14 +616,6 @@ func writeEPPPayload(dst net.Conn, payload []byte) error {
 	return err
 }
 
-func extractEPPUsername(payload []byte) string {
-	msg, err := parseLoginXML(payload)
-	if err != nil {
-		return ""
-	}
-	return msg.ClientID
-}
-
 func buildRateLimitExceededResponse() []byte {
 	return []byte(`<?xml version="1.0" encoding="UTF-8" standalone="no"?><epp xmlns="urn:ietf:params:xml:ns:epp-1.0"><response><result code="2400"><msg>Rate limit exceeded; please retry later</msg></result><trID><svTRID>rate-limit</svTRID></trID></response></epp>`)
 }
@@ -781,39 +806,4 @@ func parseTLSClientAuth(mode string) tls.ClientAuthType {
 
 func init() {
 	flag.String("env-file", envOr("EPP_ENV_FILE", ".env"), "path to .env configuration")
-}
-
-func boolFromEnv(key string, fallback bool) bool {
-	v := os.Getenv(key)
-	if v == "1" || v == "true" || v == "TRUE" || v == "yes" || v == "YES" {
-		return true
-	}
-	if v == "0" || v == "false" || v == "FALSE" || v == "no" || v == "NO" {
-		return false
-	}
-	return fallback
-}
-
-func durationFromEnv(key string, fallback time.Duration) time.Duration {
-	v := os.Getenv(key)
-	if v == "" {
-		return fallback
-	}
-	d, err := time.ParseDuration(v)
-	if err != nil {
-		return fallback
-	}
-	return d
-}
-
-func intFromEnv(key string, fallback int) int {
-	v := strings.TrimSpace(os.Getenv(key))
-	if v == "" {
-		return fallback
-	}
-	parsed, err := strconv.Atoi(v)
-	if err != nil {
-		return fallback
-	}
-	return parsed
 }

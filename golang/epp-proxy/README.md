@@ -42,6 +42,13 @@ Contoh tersedia di `env.example`.
 
 ### Variabel tambahan (operasional)
 - `EPP_CONNECT_TIMEOUT` (default `5s`) timeout call backend.
+- `EPP_BACKEND_TIMEOUT` (default `15s`) timeout total request HTTP ke backend.
+- `EPP_BACKEND_DIAL_TIMEOUT` (default `3s`) timeout koneksi TCP ke backend.
+- `EPP_BACKEND_TLS_HANDSHAKE_TIMEOUT` (default `3s`) timeout TLS handshake backend.
+- `EPP_BACKEND_IDLE_CONN_TIMEOUT` (default `90s`) masa hidup koneksi idle keep-alive.
+- `EPP_BACKEND_MAX_IDLE_CONNS` (default `2048`) pool idle koneksi backend global.
+- `EPP_BACKEND_MAX_IDLE_CONNS_PER_HOST` (default `1024`) pool idle koneksi backend per host.
+- `EPP_BACKEND_MAX_CONNS_PER_HOST` (default `0`) total koneksi backend per host (`0` = unlimited).
 - `EPP_WRITE_TIMEOUT` (default `10s`) timeout tulis response ke socket client.
 - `EPP_MAX_FRAME_BYTES` (default `65535`) batas ukuran frame EPP.
 - `EPP_MAX_CONNS` (default `1000`) batas koneksi concurrent diterima.
@@ -91,4 +98,5 @@ pm2 logs go-epp-proxy
 - Pisahkan read/write limit dengan `RATELIMIT_READ_*` dan `RATELIMIT_WRITE_*` agar operasi write lebih ketat.
 - Aktifkan mTLS (`SERVER_SSL_ENABLED=true` + `TLS_CLIENT_AUTH=REQUIRE`) agar hanya registrar resmi yang bisa connect.
 - Set `EPP_MAX_CONNS` sesuai kapasitas CPU/RAM host.
+- Untuk target throughput tinggi, aktifkan keep-alive backend dan tuning pool koneksi (`EPP_BACKEND_MAX_IDLE_CONNS*`) agar tidak terjadi bottleneck saat burst request.
 - Pastikan firewall/L4 LB juga punya proteksi SYN flood dan connection limit per source IP.

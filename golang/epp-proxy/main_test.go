@@ -305,3 +305,40 @@ func TestProcessAuthorizationAndCommand(t *testing.T) {
 		t.Fatalf("unexpected command response: %s", string(resp))
 	}
 }
+
+func TestNewBackendHTTPClient(t *testing.T) {
+	cfg := Config{
+		BackendTimeout:             9 * time.Second,
+		BackendDialTimeout:         2 * time.Second,
+		BackendTLSHandshake:        3 * time.Second,
+		BackendIdleConnTimeout:     11 * time.Second,
+		BackendMaxIdleConns:        321,
+		BackendMaxIdleConnsPerHost: 123,
+		BackendMaxConnsPerHost:     99,
+	}
+
+	httpClient := newBackendHTTPClient(cfg)
+	if httpClient.Timeout != 9*time.Second {
+		t.Fatalf("unexpected backend timeout: %v", httpClient.Timeout)
+	}
+
+	transport, ok := httpClient.Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("expected *http.Transport, got %T", httpClient.Transport)
+	}
+	if transport.MaxIdleConns != 321 {
+		t.Fatalf("unexpected MaxIdleConns: %d", transport.MaxIdleConns)
+	}
+	if transport.MaxIdleConnsPerHost != 123 {
+		t.Fatalf("unexpected MaxIdleConnsPerHost: %d", transport.MaxIdleConnsPerHost)
+	}
+	if transport.MaxConnsPerHost != 99 {
+		t.Fatalf("unexpected MaxConnsPerHost: %d", transport.MaxConnsPerHost)
+	}
+	if transport.IdleConnTimeout != 11*time.Second {
+		t.Fatalf("unexpected IdleConnTimeout: %v", transport.IdleConnTimeout)
+	}
+	if transport.TLSHandshakeTimeout != 3*time.Second {
+		t.Fatalf("unexpected TLSHandshakeTimeout: %v", transport.TLSHandshakeTimeout)
+	}
+}
