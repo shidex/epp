@@ -20,8 +20,12 @@ Contoh tersedia di `env.example`.
 - `ratelimit.ip.rules` -> `RATELIMIT_IP_RULES`
 - `ratelimit.client.rules` -> `RATELIMIT_CLIENT_RULES`
 - `ratelimit.channel.rules` -> `RATELIMIT_CHANNEL_RULES`
-- `ratelimit.write.rules` -> `RATELIMIT_WRITE_RULES` (default: `10/second` untuk operasi write seperti `create/update/renew/delete/transfer` pada domain/host/contact)
-- `ratelimit.read.rules` -> `RATELIMIT_READ_RULES` (default: `50/second,500/minute` untuk operasi read seperti `login/logout/check/info`)
+- `ratelimit.write.rules` -> `RATELIMIT_WRITE_RULES` (legacy, shared write limiter)
+- `ratelimit.read.rules` -> `RATELIMIT_READ_RULES` (legacy, shared read limiter)
+- `ratelimit.read.ip.rules` -> `RATELIMIT_READ_IP_RULES`
+- `ratelimit.write.ip.rules` -> `RATELIMIT_WRITE_IP_RULES`
+- `ratelimit.read.client.rules` -> `RATELIMIT_READ_CLIENT_RULES`
+- `ratelimit.write.client.rules` -> `RATELIMIT_WRITE_CLIENT_RULES`
 
 ## Menjalankan
 ```bash
@@ -42,7 +46,9 @@ go run . -env-file /path/to/.env
 - `-auth-url`, `-command-url`, `-logout-url`
 - `-idle-timeout`, `-connect-timeout`
 - `-rate-limit-ip`, `-rate-limit-client`, `-rate-limit-channel`
-- `-rate-limit-write`, `-rate-limit-read`
+- `-rate-limit-write`, `-rate-limit-read` (legacy)
+- `-rate-limit-read-ip`, `-rate-limit-write-ip`
+- `-rate-limit-read-client`, `-rate-limit-write-client`
 - `-max-frame-size`
 
 ## Build

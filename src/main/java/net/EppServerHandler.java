@@ -128,11 +128,13 @@ public class EppServerHandler extends ChannelInboundHandlerAdapter {
                 }
 
                 case AUTHENTICATED -> {
-                    if (SessionManager.isPostLoginRateLimited(clientIp, ctx.channel())) {
-                        SessionContext session = SessionManager.getSessionByChannel(ctx.channel());
-                        String clientId = session != null ? session.getClientId() : null;
+                    SessionContext session = SessionManager.getSessionByChannel(ctx.channel());
+                    String clientId = session != null ? session.getClientId() : null;
+                    boolean writeCommand = isWriteCommand(message);
 
-                        System.err.println("[RATE LIMIT] Post-login limit exceeded. ip=" + clientIp
+                    if (SessionManager.isRateLimited(clientIp, clientId, ctx.channel(), writeCommand)) {
+                        System.err.println("[RATE LIMIT] Post-login limit exceeded. type=" + (writeCommand ? "WRITE" : "READ")
+                                + " ip=" + clientIp
                                 + " clID=" + clientId
                                 + " channel=" + ctx.channel().id().asShortText());
 
@@ -173,6 +175,23 @@ public class EppServerHandler extends ChannelInboundHandlerAdapter {
                         .addListener(f -> ctx.close());
             }
         }
+    }
+
+
+    private boolean isWriteCommand(String rawMessage) {
+        if (rawMessage == null) {
+            return true;
+        }
+
+        String xml = rawMessage.toLowerCase();
+
+        if (xml.contains("<check") || xml.contains(":check")
+                || xml.contains("<info") || xml.contains(":info")
+                || xml.contains("<poll") || xml.contains(":poll")) {
+            return false;
+        }
+
+        return true;
     }
 
     private void handleLogin(ChannelHandlerContext ctx, EppRequest request, String sessionId, String clientIp) {

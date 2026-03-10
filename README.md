@@ -130,6 +130,10 @@ logging.xml.max.chars=512
 ratelimit.ip.rules=10/second,60/minute
 ratelimit.client.rules=50/second,500/minute
 ratelimit.channel.rules=10/second,60/minute
+ratelimit.read.ip.rules=30/second,200/minute
+ratelimit.write.ip.rules=10/second,60/minute
+ratelimit.read.client.rules=100/second,800/minute
+ratelimit.write.client.rules=50/second,500/minute
 ```
 
 ## Configuration Description
@@ -148,13 +152,19 @@ ratelimit.channel.rules=10/second,60/minute
 | `logging.xml.max.chars` | Batas preview XML saat `logging.xml.full=false` |
 | `ratelimit.ip.rules` | Rate limit rules per client IP |
 | `ratelimit.client.rules` | Rate limit rules per authenticated client / registrar |
-| `ratelimit.channel.rules` | Rate limit rules per connection / channel |
+| `ratelimit.channel.rules` | Baseline rate limit rules per connection / channel |
+| `ratelimit.read.ip.rules` | Additional read-command rate limit rules per client IP |
+| `ratelimit.write.ip.rules` | Additional write-command rate limit rules per client IP |
+| `ratelimit.read.client.rules` | Additional read-command rate limit rules per authenticated client |
+| `ratelimit.write.client.rules` | Additional write-command rate limit rules per authenticated client |
 
 ## Notes
 
 - `tls.client.auth=REQUIRE` means mutual TLS client certificate is mandatory.
 - `enable.validation=false` disables XML/XSD validation at runtime.
 - Rate limit rules use a multi-window format such as `10/second,60/minute`.
+- Read commands are treated as `check`, `info`, and `poll`; other commands are treated as write commands.
+- If `ratelimit.read.*` / `ratelimit.write.*` are omitted, the server falls back to existing baseline `ratelimit.ip.rules` / `ratelimit.client.rules`.
 
 # Build Application
 

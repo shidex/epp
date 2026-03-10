@@ -83,8 +83,7 @@ func TestRateLimiterAllow(t *testing.T) {
 	cfg := Config{
 		IPRateLimitRules: []rateLimitRule{{limit: 2, window: 50 * time.Millisecond}},
 		ChannelRateLimit: []rateLimitRule{{limit: 2, window: 50 * time.Millisecond}},
-		WriteRateLimit:   []rateLimitRule{{limit: 1, window: 50 * time.Millisecond}},
-		ReadRateLimit:    []rateLimitRule{{limit: 3, window: 50 * time.Millisecond}},
+		ReadIPRateLimit:  []rateLimitRule{{limit: 3, window: 50 * time.Millisecond}},
 	}
 
 	if !limiter.Allow("1.1.1.1", "", "chan-1", "read", cfg) {
@@ -106,8 +105,8 @@ func TestRateLimiterAllow(t *testing.T) {
 func TestRateLimiterAllowWriteAndReadBuckets(t *testing.T) {
 	limiter := newRateLimiter(Config{})
 	cfg := Config{
-		WriteRateLimit: []rateLimitRule{{limit: 1, window: time.Second}},
-		ReadRateLimit:  []rateLimitRule{{limit: 2, window: time.Second}},
+		WriteIPRateLimit: []rateLimitRule{{limit: 1, window: time.Second}},
+		ReadIPRateLimit:  []rateLimitRule{{limit: 2, window: time.Second}},
 	}
 
 	if !limiter.Allow("1.1.1.1", "registrar1", "chan-1", "write", cfg) {
@@ -128,6 +127,39 @@ func TestRateLimiterAllowWriteAndReadBuckets(t *testing.T) {
 	}
 }
 
+func TestRateLimiterAllowReadWriteByIPAndClient(t *testing.T) {
+	limiter := newRateLimiter(Config{})
+	cfg := Config{
+		WriteIPRateLimit:  []rateLimitRule{{limit: 5, window: time.Second}},
+		WriteClientLimit:  []rateLimitRule{{limit: 1, window: time.Second}},
+		ReadIPRateLimit:   []rateLimitRule{{limit: 2, window: time.Second}},
+		ReadClientLimit:   []rateLimitRule{{limit: 2, window: time.Second}},
+		ChannelRateLimit:  []rateLimitRule{{limit: 10, window: time.Second}},
+		IPRateLimitRules:  []rateLimitRule{{limit: 10, window: time.Second}},
+		ClientRateLimit:   []rateLimitRule{{limit: 10, window: time.Second}},
+	}
+
+	if !limiter.Allow("1.1.1.1", "user-a", "chan-1", "write", cfg) {
+		t.Fatal("first write user-a should pass")
+	}
+	if limiter.Allow("1.1.1.1", "user-a", "chan-1", "write", cfg) {
+		t.Fatal("second write user-a should be blocked by write-client rule")
+	}
+	if !limiter.Allow("1.1.1.1", "user-b", "chan-2", "write", cfg) {
+		t.Fatal("write user-b should pass because client bucket is independent")
+	}
+
+	if !limiter.Allow("2.2.2.2", "", "chan-3", "read", cfg) {
+		t.Fatal("first anonymous read should pass")
+	}
+	if !limiter.Allow("2.2.2.2", "", "chan-3", "read", cfg) {
+		t.Fatal("second anonymous read should pass")
+	}
+	if limiter.Allow("2.2.2.2", "", "chan-3", "read", cfg) {
+		t.Fatal("third anonymous read should be blocked by read-ip rule")
+	}
+}
+
 func TestClassifyCommandType(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -140,7 +172,7 @@ func TestClassifyCommandType(t *testing.T) {
 		{name: "contact update", xml: `<epp><command><update><contact:update/></update></command></epp>`, expect: "write"},
 		{name: "host check", xml: `<epp><command><check><host:check/></check></command></epp>`, expect: "read"},
 		{name: "domain info", xml: `<epp><command><info><domain:info/></info></command></epp>`, expect: "read"},
-		{name: "poll", xml: `<epp><command><poll op="req"/></command></epp>`, expect: ""},
+		{name: "poll", xml: `<epp><command><poll op="req"/></command></epp>`, expect: "read"},
 	}
 
 	for _, tc := range tests {
