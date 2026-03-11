@@ -24,6 +24,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -423,6 +424,94 @@ func TestReadEPPPayloadTooLarge(t *testing.T) {
 	_, err := readEPPPayload(bufio.NewReader(bytes.NewReader(buf.Bytes())), 1024)
 	if err == nil {
 		t.Fatal("expected frame too large error")
+	}
+}
+
+func TestHandleConnDomainReadCacheHitSkipsBackend(t *testing.T) {
+	var commandCalls atomic.Int32
+	authSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"responseCode":"00","eppSessionToken":"tok-1"}`))
+	}))
+	defer authSrv.Close()
+
+	cmdResponse := []byte(`<epp><response><result code="1000"><msg>cached-domain-check</msg></result></response></epp>`)
+	cmdSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		commandCalls.Add(1)
+		_, _ = w.Write(cmdResponse)
+	}))
+	defer cmdSrv.Close()
+
+	serverConn, clientConn := net.Pipe()
+	defer serverConn.Close()
+	defer clientConn.Close()
+
+	cfg := Config{
+		AuthBackendURL:          authSrv.URL,
+		CommandBackendURL:       cmdSrv.URL,
+		LogFormat:               "json",
+		IdleTimeout:             time.Second,
+		WriteTimeout:            time.Second,
+		MaxFrameSize:            64 * 1024,
+		BackendResponseMaxBytes: 1024,
+	}
+
+	logger := log.New(io.Discard, "", 0)
+	tracker := newConnectionTracker()
+	cache := newCommandCache(time.Minute)
+	limiter := newRateLimiter(cfg)
+	httpClient := &http.Client{Timeout: 2 * time.Second}
+
+	done := make(chan struct{})
+	go func() {
+		handleConn(cfg, logger, limiter, cache, tracker, httpClient, serverConn)
+		close(done)
+	}()
+
+	reader := bufio.NewReader(clientConn)
+	if _, err := readEPPPayload(reader, cfg.MaxFrameSize); err != nil {
+		t.Fatalf("read greeting failed: %v", err)
+	}
+
+	login := []byte(`<?xml version="1.0" encoding="UTF-8"?><epp><command><login><clID>registrar1</clID><pw>pw</pw></login><clTRID>abc</clTRID></command></epp>`)
+	if err := writeEPPPayload(clientConn, login); err != nil {
+		t.Fatalf("write login failed: %v", err)
+	}
+	if _, err := readEPPPayload(reader, cfg.MaxFrameSize); err != nil {
+		t.Fatalf("read login response failed: %v", err)
+	}
+
+	domainCheck := []byte(`<epp><command><check><domain:check><domain:name>example.id</domain:name></domain:check></check></command></epp>`)
+	if err := writeEPPPayload(clientConn, domainCheck); err != nil {
+		t.Fatalf("write first domain check failed: %v", err)
+	}
+	firstResp, err := readEPPPayload(reader, cfg.MaxFrameSize)
+	if err != nil {
+		t.Fatalf("read first domain check response failed: %v", err)
+	}
+	if !bytes.Equal(firstResp, cmdResponse) {
+		t.Fatalf("unexpected first domain check response: %s", string(firstResp))
+	}
+
+	if err := writeEPPPayload(clientConn, domainCheck); err != nil {
+		t.Fatalf("write second domain check failed: %v", err)
+	}
+	secondResp, err := readEPPPayload(reader, cfg.MaxFrameSize)
+	if err != nil {
+		t.Fatalf("read second domain check response failed: %v", err)
+	}
+	if !bytes.Equal(secondResp, cmdResponse) {
+		t.Fatalf("unexpected second domain check response: %s", string(secondResp))
+	}
+
+	if got := commandCalls.Load(); got != 1 {
+		t.Fatalf("expected backend command called once due to cache hit, got %d", got)
+	}
+
+	_ = clientConn.Close()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("handleConn did not return after client close")
 	}
 }
 
