@@ -102,6 +102,7 @@ Catatan balancing yang dipakai:
 - `TLS_CA_CERT` dipakai untuk verifikasi **client certificate** saat `TLS_CLIENT_AUTH` = `OPTIONAL` atau `REQUIRE` (mTLS).
 - Jika `TLS_CLIENT_AUTH=NONE`, maka `TLS_CA_CERT` **boleh diabaikan** (tidak dibaca listener).
 - Listener dipaksa minimal TLS 1.2.
+- Hash sertifikat yang dikirim ke backend auth diambil dari **client certificate registrar** (`PeerCertificates[0]` pada koneksi TLS sisi server), jadi ini alur **mTLS/mutual TLS** (bukan hash sertifikat server/proxy).
 
 Contoh membuat full chain:
 ```bash
