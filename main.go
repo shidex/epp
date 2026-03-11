@@ -424,10 +424,7 @@ func handleConn(cfg Config, logger *log.Logger, limiter *rateLimiter, tracker *c
 	defer client.Close()
 	clientID := client.RemoteAddr().String()
 	remoteAddr := remoteIP(client.RemoteAddr())
-	certificateHash, err := resolveRegistrarCertificateHash(client)
-	if err != nil {
-		logEvent(logger, cfg.LogFormat, "warn", "client_certificate_hash_unavailable", map[string]any{"channel": clientID, "remote_ip": remoteAddr, "error": err.Error()})
-	}
+	certificateHash := ""
 	tracker.connectionOpened(remoteAddr)
 	defer tracker.connectionClosed(remoteAddr)
 
@@ -486,6 +483,14 @@ func handleConn(cfg Config, logger *log.Logger, limiter *rateLimiter, tracker *c
 				_ = client.SetWriteDeadline(time.Now().Add(cfg.WriteTimeout))
 				_ = writeEPPPayload(client, []byte(buildErrorResponse("Expected <login>")))
 				return
+			}
+
+			if strings.TrimSpace(certificateHash) == "" {
+				var hashErr error
+				certificateHash, hashErr = resolveRegistrarCertificateHash(client)
+				if hashErr != nil {
+					logEvent(logger, cfg.LogFormat, "warn", "client_certificate_hash_unavailable", map[string]any{"channel": clientID, "remote_ip": remoteAddr, "error": hashErr.Error()})
+				}
 			}
 
 			if strings.TrimSpace(certificateHash) == "" {
@@ -707,11 +712,10 @@ func resolveRegistrarCertificateHash(client net.Conn) (string, error) {
 		return "", nil
 	}
 
-	if err := tlsConn.Handshake(); err != nil {
-		return "", fmt.Errorf("tls handshake failed: %w", err)
-	}
-
 	state := tlsConn.ConnectionState()
+	if !state.HandshakeComplete {
+		return "", fmt.Errorf("tls handshake not complete")
+	}
 	if len(state.PeerCertificates) == 0 {
 		return "", fmt.Errorf("no registrar certificate presented by client")
 	}
