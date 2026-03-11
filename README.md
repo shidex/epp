@@ -184,6 +184,7 @@ Default konfigurasi:
 - write timeout: `1s` per percobaan.
 
 Jika write lambat/gagal, proses write akan **diabaikan (skip)** dan service utama tetap lanjut supaya tidak mengganggu performa layanan.
+Setiap kali snapshot berhasil ditulis, counter `commands` dan `blocked` akan **di-reset** (mulai hitung dari nol lagi) agar file JSON menampilkan data terbaru per periode cron/interval saat ini. Counter koneksi aktif (`connections`) tidak di-reset karena merepresentasikan kondisi live.
 
 Tetap tersedia fungsi internal bila dibutuhkan dari kode Go di proses yang sama:
 
