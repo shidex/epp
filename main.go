@@ -18,6 +18,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -58,6 +59,9 @@ type Config struct {
 	BackendMaxConnsPerHost     int
 	BackendResponseMaxBytes    int64
 	LogFormat                  string
+	RealtimeStatsFile          string
+	RealtimeStatsInterval      time.Duration
+	RealtimeStatsWriteTimeout  time.Duration
 }
 
 type rateLimiter struct {
@@ -163,6 +167,8 @@ func main() {
 	connSlots := make(chan struct{}, max(1, cfg.MaxConns))
 
 	logEvent(logger, cfg.LogFormat, "info", "service_started", map[string]any{"listen_addr": cfg.ListenAddr, "auth_url": cfg.AuthBackendURL, "command_url": cfg.CommandBackendURL, "max_conns": cfg.MaxConns})
+	stopStatsWriter := startRealtimeStatsWriter(ctx, logger, cfg, tracker)
+	defer stopStatsWriter()
 
 	var wg sync.WaitGroup
 	for {
@@ -236,6 +242,9 @@ func loadConfig() Config {
 	backendMaxConnsPerHost := flag.Int("backend-max-conns-per-host", intWithFallback(envOr("EPP_BACKEND_MAX_CONNS_PER_HOST", "0"), 0), "maximum total backend HTTP connections per host; 0 means unlimited")
 	backendResponseMaxBytes := flag.Int64("backend-response-max-bytes", int64(intWithFallback(envOr("EPP_BACKEND_RESPONSE_MAX_BYTES", "1048576"), 1048576)), "maximum response body bytes read from backend")
 	logFormat := flag.String("log-format", strings.ToLower(envOr("EPP_LOG_FORMAT", "json")), "log format: json or text")
+	realtimeStatsFile := flag.String("realtime-stats-file", envOr("EPP_REALTIME_STATS_FILE", "logs/realtime-stats.json"), "path to realtime stats json file")
+	realtimeStatsInterval := flag.Duration("realtime-stats-interval", durationWithFallback(envOr("EPP_REALTIME_STATS_INTERVAL", "5s"), 5*time.Second), "refresh interval for realtime stats json file")
+	realtimeStatsWriteTimeout := flag.Duration("realtime-stats-write-timeout", durationWithFallback(envOr("EPP_REALTIME_STATS_WRITE_TIMEOUT", "1s"), time.Second), "max duration for each realtime stats file write before skipping")
 	flag.Parse()
 
 	return Config{
@@ -271,6 +280,94 @@ func loadConfig() Config {
 		BackendMaxConnsPerHost:     *backendMaxConnsPerHost,
 		BackendResponseMaxBytes:    *backendResponseMaxBytes,
 		LogFormat:                  *logFormat,
+		RealtimeStatsFile:          *realtimeStatsFile,
+		RealtimeStatsInterval:      *realtimeStatsInterval,
+		RealtimeStatsWriteTimeout:  *realtimeStatsWriteTimeout,
+	}
+}
+
+func startRealtimeStatsWriter(ctx context.Context, logger *log.Logger, cfg Config, tracker *connectionTracker) func() {
+	filePath := strings.TrimSpace(cfg.RealtimeStatsFile)
+	if filePath == "" {
+		return func() {}
+	}
+
+	interval := cfg.RealtimeStatsInterval
+	if interval <= 0 {
+		interval = 5 * time.Second
+	}
+	writeTimeout := cfg.RealtimeStatsWriteTimeout
+	if writeTimeout <= 0 {
+		writeTimeout = time.Second
+	}
+
+	writerCtx, cancel := context.WithCancel(ctx)
+	inFlight := make(chan struct{}, 1)
+
+	writeOnce := func() {
+		stats := getInternalRealtimeStats(tracker)
+		data, err := json.MarshalIndent(stats, "", "  ")
+		if err != nil {
+			logEvent(logger, cfg.LogFormat, "warn", "realtime_stats_serialize_failed", map[string]any{"error": err.Error()})
+			return
+		}
+		if err = writeJSONWithTimeout(filePath, data, writeTimeout); err != nil {
+			logEvent(logger, cfg.LogFormat, "warn", "realtime_stats_write_skipped", map[string]any{"path": filePath, "error": err.Error()})
+		}
+	}
+
+	select {
+	case inFlight <- struct{}{}:
+		go func() {
+			defer func() { <-inFlight }()
+			writeOnce()
+		}()
+	default:
+	}
+
+	go func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-writerCtx.Done():
+				return
+			case <-ticker.C:
+				select {
+				case inFlight <- struct{}{}:
+					go func() {
+						defer func() { <-inFlight }()
+						writeOnce()
+					}()
+				default:
+					logEvent(logger, cfg.LogFormat, "warn", "realtime_stats_write_skipped", map[string]any{"path": filePath, "error": "previous_write_still_running"})
+				}
+			}
+		}
+	}()
+
+	return cancel
+}
+
+func writeJSONWithTimeout(path string, payload []byte, timeout time.Duration) error {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	errCh := make(chan error, 1)
+	go func() {
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			errCh <- err
+			return
+		}
+		errCh <- os.WriteFile(path, append(payload, '\n'), 0o644)
+	}()
+
+	select {
+	case <-ctx.Done():
+		return fmt.Errorf("write_timeout_after_%s", timeout)
+	case err := <-errCh:
+		return err
 	}
 }
 

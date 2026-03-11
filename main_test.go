@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/tls"
@@ -11,12 +12,15 @@ import (
 	"encoding/binary"
 	"encoding/pem"
 	"fmt"
+	"io"
 	"log"
 	"math/big"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -418,6 +422,56 @@ func TestReadBodyWithLimit(t *testing.T) {
 	_, err = readBodyWithLimit(errReader{}, 3)
 	if err == nil {
 		t.Fatal("expected reader error")
+	}
+}
+
+func TestWriteJSONWithTimeout(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "stats.json")
+	payload := []byte(`{"ok":true}`)
+
+	if err := writeJSONWithTimeout(path, payload, time.Second); err != nil {
+		t.Fatalf("writeJSONWithTimeout failed: %v", err)
+	}
+
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read file failed: %v", err)
+	}
+	if got := string(raw); !strings.Contains(got, `{"ok":true}`) {
+		t.Fatalf("unexpected file content: %q", got)
+	}
+}
+
+func TestStartRealtimeStatsWriterCreatesFile(t *testing.T) {
+	dir := t.TempDir()
+	statsPath := filepath.Join(dir, "realtime", "stats.json")
+	tracker := newConnectionTracker()
+	tracker.connectionOpened("1.1.1.1")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	logger := log.New(io.Discard, "", 0)
+	stop := startRealtimeStatsWriter(ctx, logger, Config{
+		RealtimeStatsFile:         statsPath,
+		RealtimeStatsInterval:     20 * time.Millisecond,
+		RealtimeStatsWriteTimeout: 200 * time.Millisecond,
+		LogFormat:                 "json",
+	}, tracker)
+	defer stop()
+
+	deadline := time.Now().Add(time.Second)
+	for {
+		raw, err := os.ReadFile(statsPath)
+		if err == nil {
+			if strings.Contains(string(raw), `"connections"`) {
+				return
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("realtime stats file was not written in time: %v", err)
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
 }
 

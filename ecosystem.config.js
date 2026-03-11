@@ -12,7 +12,10 @@ module.exports = {
       error_file: './logs/pm2-err.log',
       env: {
         EPP_ENV_FILE: './.env',
-        EPP_LOG_FORMAT: 'json'
+        EPP_LOG_FORMAT: 'json',
+        EPP_REALTIME_STATS_FILE: './logs/realtime-stats.json',
+        EPP_REALTIME_STATS_INTERVAL: '5s',
+        EPP_REALTIME_STATS_WRITE_TIMEOUT: '1s'
       }
     }
   ]

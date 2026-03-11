@@ -92,6 +92,9 @@ Catatan balancing yang dipakai:
 - `EPP_MAX_CONNS` (default `1000`) batas koneksi concurrent diterima.
 - `EPP_RATELIMIT_MAX_KEYS` (default `100000`) batas key unik per scope rate limiter.
 - `EPP_LOG_FORMAT` (default `json`) format log: `json` atau `text`.
+- `EPP_REALTIME_STATS_FILE` (default `logs/realtime-stats.json`) path file JSON realtime stats.
+- `EPP_REALTIME_STATS_INTERVAL` (default `5s`) interval refresh snapshot realtime stats.
+- `EPP_REALTIME_STATS_WRITE_TIMEOUT` (default `1s`) timeout maksimum tiap penulisan file stats; jika timeout/gagal maka di-skip agar tidak mengganggu layanan.
 
 ## TLS frontend (sertifikat chain)
 - `TLS_SERVER_CERT` dapat berisi **full chain** dalam satu file PEM (urutan: leaf certificate lalu intermediate CA). Ini direkomendasikan agar klien dari luar menerima chain lengkap saat handshake.
@@ -167,14 +170,21 @@ Penjelasan singkat:
 - Untuk target throughput tinggi, aktifkan keep-alive backend dan tuning pool koneksi (`EPP_BACKEND_MAX_IDLE_CONNS*`) agar tidak terjadi bottleneck saat burst request.
 - Pastikan firewall/L4 LB juga punya proteksi SYN flood dan connection limit per source IP.
 
-## Internal realtime stats (cara menggunakan)
+## Internal realtime stats (otomatis JSON untuk PM2)
 
-Fitur ini **internal only** (tidak membuka endpoint HTTP publik). Data yang disimpan:
+Fitur ini **internal only** (tidak membuka endpoint HTTP publik), tetapi sekarang otomatis menulis snapshot ke file JSON saat service berjalan (termasuk saat dijalankan via PM2). Data yang disimpan:
 - koneksi aktif: total, per IP, per username,
 - command: total read/write, read/write per IP, read/write per username,
 - blocked (rate limit): total, per IP, per username.
 
-Untuk mengambil snapshot realtime, panggil fungsi internal berikut dari kode Go di proses yang sama:
+Default konfigurasi:
+- file output: `logs/realtime-stats.json`,
+- refresh interval: `5s`,
+- write timeout: `1s` per percobaan.
+
+Jika write lambat/gagal, proses write akan **diabaikan (skip)** dan service utama tetap lanjut supaya tidak mengganggu performa layanan.
+
+Tetap tersedia fungsi internal bila dibutuhkan dari kode Go di proses yang sama:
 
 ```go
 stats := getInternalRealtimeStats(tracker)
@@ -208,6 +218,6 @@ Contoh bentuk data snapshot (JSON):
 ```
 
 Rekomendasi pemakaian:
-- panggil berkala dari job internal (misalnya ticker per 5-10 detik),
-- kirim ke log/observability internal,
+- monitor file JSON tersebut dari tooling observability,
+- jika perlu interval berbeda, ubah `EPP_REALTIME_STATS_INTERVAL` (mis. `10s`),
 - jangan expose langsung ke jaringan publik.
