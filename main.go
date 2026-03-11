@@ -129,9 +129,10 @@ type bucket struct {
 }
 
 type commandCache struct {
-	mu      sync.RWMutex
-	entries map[string]cacheEntry
-	ttl     time.Duration
+	mu       sync.RWMutex
+	entries  map[string]cacheEntry
+	inflight map[string]chan struct{}
+	ttl      time.Duration
 }
 
 type cacheEntry struct {
@@ -577,13 +578,46 @@ func handleConn(cfg Config, logger *log.Logger, limiter *rateLimiter, domainCach
 
 			cacheKey, cacheable := buildDomainReadCacheKey(payload)
 			if cacheable {
-				if cachedBody, ok := domainCache.Get(cacheKey); ok {
+				cachedBody, hit, waitCh, reserved := domainCache.GetOrReserve(cacheKey)
+				if hit {
 					_ = client.SetWriteDeadline(time.Now().Add(cfg.WriteTimeout))
 					if err = writeEPPPayload(client, cachedBody); err != nil {
 						logEvent(logger, cfg.LogFormat, "error", "write_cached_command_response_failed", map[string]any{"channel": clientID, "error": err.Error()})
 						return
 					}
 					logEvent(logger, cfg.LogFormat, "info", "domain_read_cache_hit", map[string]any{"channel": clientID, "username": username, "cache_key": cacheKey})
+					continue
+				}
+
+				if waitCh != nil {
+					<-waitCh
+					if cachedAfterWait, ok := domainCache.Get(cacheKey); ok {
+						_ = client.SetWriteDeadline(time.Now().Add(cfg.WriteTimeout))
+						if err = writeEPPPayload(client, cachedAfterWait); err != nil {
+							logEvent(logger, cfg.LogFormat, "error", "write_cached_command_response_failed", map[string]any{"channel": clientID, "error": err.Error()})
+							return
+						}
+						logEvent(logger, cfg.LogFormat, "info", "domain_read_cache_hit_after_wait", map[string]any{"channel": clientID, "username": username, "cache_key": cacheKey})
+						continue
+					}
+					_, _, _, reserved = domainCache.GetOrReserve(cacheKey)
+				}
+
+				if reserved {
+					respBody, callErr := postEPPCommand(httpClient, cfg.CommandBackendURL, token, payload, cfg.BackendResponseMaxBytes)
+					if callErr != nil {
+						domainCache.CompleteReservation(cacheKey, nil)
+						logEvent(logger, cfg.LogFormat, "error", "backend_command_failed", map[string]any{"channel": clientID, "username": username, "error": callErr.Error()})
+						_ = client.SetWriteDeadline(time.Now().Add(cfg.WriteTimeout))
+						_ = writeEPPPayload(client, []byte(buildErrorResponse("Unexpected server error")))
+						return
+					}
+					domainCache.CompleteReservation(cacheKey, respBody)
+					_ = client.SetWriteDeadline(time.Now().Add(cfg.WriteTimeout))
+					if err = writeEPPPayload(client, respBody); err != nil {
+						logEvent(logger, cfg.LogFormat, "error", "write_command_response_failed", map[string]any{"channel": clientID, "error": err.Error()})
+						return
+					}
 					continue
 				}
 			}
@@ -608,10 +642,13 @@ func handleConn(cfg Config, logger *log.Logger, limiter *rateLimiter, domainCach
 }
 
 func newCommandCache(ttl time.Duration) *commandCache {
-	return &commandCache{entries: make(map[string]cacheEntry), ttl: ttl}
+	return &commandCache{entries: make(map[string]cacheEntry), inflight: make(map[string]chan struct{}), ttl: ttl}
 }
 
 func (c *commandCache) Get(key string) ([]byte, bool) {
+	if c.ttl <= 0 {
+		return nil, false
+	}
 	if strings.TrimSpace(key) == "" {
 		return nil, false
 	}
@@ -632,11 +669,55 @@ func (c *commandCache) Get(key string) ([]byte, bool) {
 }
 
 func (c *commandCache) Set(key string, response []byte) {
-	if strings.TrimSpace(key) == "" || len(response) == 0 {
+	if c.ttl <= 0 || strings.TrimSpace(key) == "" || len(response) == 0 {
 		return
 	}
 	c.mu.Lock()
 	c.entries[key] = cacheEntry{response: append([]byte(nil), response...), expiresAt: time.Now().Add(c.ttl)}
+	c.mu.Unlock()
+}
+
+func (c *commandCache) GetOrReserve(key string) ([]byte, bool, <-chan struct{}, bool) {
+	if c.ttl <= 0 || strings.TrimSpace(key) == "" {
+		return nil, false, nil, false
+	}
+
+	now := time.Now()
+	c.mu.Lock()
+	if entry, ok := c.entries[key]; ok {
+		if now.After(entry.expiresAt) {
+			delete(c.entries, key)
+		} else {
+			resp := append([]byte(nil), entry.response...)
+			c.mu.Unlock()
+			return resp, true, nil, false
+		}
+	}
+
+	if waiter, exists := c.inflight[key]; exists {
+		c.mu.Unlock()
+		return nil, false, waiter, false
+	}
+
+	waiter := make(chan struct{})
+	c.inflight[key] = waiter
+	c.mu.Unlock()
+	return nil, false, nil, true
+}
+
+func (c *commandCache) CompleteReservation(key string, response []byte) {
+	if c.ttl <= 0 || strings.TrimSpace(key) == "" {
+		return
+	}
+
+	c.mu.Lock()
+	if waiter, ok := c.inflight[key]; ok {
+		delete(c.inflight, key)
+		if len(response) > 0 {
+			c.entries[key] = cacheEntry{response: append([]byte(nil), response...), expiresAt: time.Now().Add(c.ttl)}
+		}
+		close(waiter)
+	}
 	c.mu.Unlock()
 }
 
