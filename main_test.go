@@ -320,6 +320,50 @@ func TestClassifyCommandType(t *testing.T) {
 	}
 }
 
+func TestBuildDomainReadCacheKey(t *testing.T) {
+	tests := []struct {
+		name    string
+		xml     string
+		wantKey string
+		wantOK  bool
+	}{
+		{name: "domain check", xml: `<epp><command><check><domain:check><domain:name>Example.ID</domain:name></domain:check></check></command></epp>`, wantKey: "check:example.id", wantOK: true},
+		{name: "domain info", xml: `<epp><command><info><domain:info><domain:name hosts="all">EXAMPLE.ID</domain:name></domain:info></info></command></epp>`, wantKey: "info:example.id", wantOK: true},
+		{name: "host check not cached", xml: `<epp><command><check><host:check><host:name>ns1.example.id</host:name></host:check></check></command></epp>`, wantKey: "", wantOK: false},
+		{name: "domain create not cached", xml: `<epp><command><create><domain:create><domain:name>example.id</domain:name></domain:create></create></command></epp>`, wantKey: "", wantOK: false},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			gotKey, gotOK := buildDomainReadCacheKey([]byte(tc.xml))
+			if gotOK != tc.wantOK {
+				t.Fatalf("expected ok=%v got %v", tc.wantOK, gotOK)
+			}
+			if gotKey != tc.wantKey {
+				t.Fatalf("expected key=%q got %q", tc.wantKey, gotKey)
+			}
+		})
+	}
+}
+
+func TestCommandCacheSetAndExpiry(t *testing.T) {
+	cache := newCommandCache(30 * time.Millisecond)
+	cache.Set("check:example.id", []byte("cached-response"))
+
+	got, ok := cache.Get("check:example.id")
+	if !ok {
+		t.Fatal("expected cache hit")
+	}
+	if string(got) != "cached-response" {
+		t.Fatalf("unexpected cached body: %q", string(got))
+	}
+
+	time.Sleep(40 * time.Millisecond)
+	if _, ok = cache.Get("check:example.id"); ok {
+		t.Fatal("expected cache miss after ttl")
+	}
+}
+
 func TestParseLoginXML(t *testing.T) {
 	xmlPayload := []byte(`<?xml version="1.0" encoding="UTF-8"?><epp xmlns="urn:ietf:params:xml:ns:epp-1.0"><command><login><clID>registrar1</clID><pw>pw1</pw><newPW>pw2</newPW></login><clTRID>abc</clTRID></command></epp>`)
 	got, err := parseLoginXML(xmlPayload)
