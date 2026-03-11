@@ -310,7 +310,7 @@ func startRealtimeStatsWriter(ctx context.Context, logger *log.Logger, cfg Confi
 	inFlight := make(chan struct{}, 1)
 
 	writeOnce := func() {
-		stats := getInternalRealtimeStats(tracker)
+		stats := getAndResetRealtimeStats(tracker)
 		data, err := json.MarshalIndent(stats, "", "  ")
 		if err != nil {
 			logEvent(logger, cfg.LogFormat, "warn", "realtime_stats_serialize_failed", map[string]any{"error": err.Error()})
@@ -665,6 +665,36 @@ func getInternalRealtimeStats(tracker *connectionTracker) realtimeStats {
 		return realtimeStats{}
 	}
 	return tracker.snapshot()
+}
+
+func getAndResetRealtimeStats(tracker *connectionTracker) realtimeStats {
+	if tracker == nil {
+		return realtimeStats{}
+	}
+	return tracker.snapshotAndResetCounters()
+}
+
+func (t *connectionTracker) snapshotAndResetCounters() realtimeStats {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	snapshot := realtimeStats{
+		Connections: connectionSnapshot{Total: t.activeTotal, PerIP: cloneMap(t.activeByIP), PerUser: cloneMap(t.activeByUser)},
+		Commands:    commandSnapshot{TotalRead: t.totalRead, TotalWrite: t.totalWrite, ReadPerIP: cloneMap(t.readByIP), WritePerIP: cloneMap(t.writeByIP), ReadPerUser: cloneMap(t.readByUser), WritePerUser: cloneMap(t.writeByUser)},
+		Blocked:     blockedSnapshot{Total: t.blockedTotal, PerIP: cloneMap(t.blockedByIP), PerUser: cloneMap(t.blockedByUser)},
+	}
+
+	t.totalRead = 0
+	t.totalWrite = 0
+	t.readByIP = make(map[string]int)
+	t.writeByIP = make(map[string]int)
+	t.readByUser = make(map[string]int)
+	t.writeByUser = make(map[string]int)
+	t.blockedTotal = 0
+	t.blockedByIP = make(map[string]int)
+	t.blockedByUser = make(map[string]int)
+
+	return snapshot
 }
 
 func cloneMap(src map[string]int) map[string]int {

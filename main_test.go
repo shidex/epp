@@ -250,6 +250,37 @@ func TestConnectionTrackerSnapshot(t *testing.T) {
 	}
 }
 
+func TestGetAndResetRealtimeStatsResetsCountersButKeepsActiveConnections(t *testing.T) {
+	tracker := newConnectionTracker()
+	tracker.connectionOpened("1.1.1.1")
+	tracker.attachUsername("user-a")
+	tracker.recordCommand("1.1.1.1", "user-a", "read")
+	tracker.recordCommand("1.1.1.1", "user-a", "write")
+	tracker.recordBlocked("1.1.1.1", "user-a")
+
+	first := getAndResetRealtimeStats(tracker)
+	if first.Connections.Total != 1 {
+		t.Fatalf("expected active total 1 got %d", first.Connections.Total)
+	}
+	if first.Commands.TotalRead != 1 || first.Commands.TotalWrite != 1 {
+		t.Fatalf("unexpected first command totals: %+v", first.Commands)
+	}
+	if first.Blocked.Total != 1 {
+		t.Fatalf("expected blocked total 1 got %d", first.Blocked.Total)
+	}
+
+	second := getAndResetRealtimeStats(tracker)
+	if second.Connections.Total != 1 {
+		t.Fatalf("active connection should remain visible, got %d", second.Connections.Total)
+	}
+	if second.Commands.TotalRead != 0 || second.Commands.TotalWrite != 0 {
+		t.Fatalf("expected command counters reset, got %+v", second.Commands)
+	}
+	if second.Blocked.Total != 0 {
+		t.Fatalf("expected blocked counter reset, got %d", second.Blocked.Total)
+	}
+}
+
 func TestLogEventJSON(t *testing.T) {
 	buf := &bytes.Buffer{}
 	logger := log.New(buf, "", 0)
