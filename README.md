@@ -95,6 +95,7 @@ Catatan balancing yang dipakai:
 - `EPP_REALTIME_STATS_FILE` (default `logs/realtime-stats.json`) path file JSON realtime stats.
 - `EPP_REALTIME_STATS_INTERVAL` (default `5s`) interval refresh snapshot realtime stats.
 - `EPP_REALTIME_STATS_WRITE_TIMEOUT` (default `1s`) timeout maksimum tiap penulisan file stats; jika timeout/gagal maka di-skip agar tidak mengganggu layanan.
+- `EPP_DOMAIN_READ_CACHE_TTL` (default `30s`) durasi cache untuk response command read domain yang idempotent.
 
 ## TLS frontend (sertifikat chain)
 - `TLS_SERVER_CERT` dapat berisi **full chain** dalam satu file PEM (urutan: leaf certificate lalu intermediate CA). Ini direkomendasikan agar klien dari luar menerima chain lengkap saat handshake.
