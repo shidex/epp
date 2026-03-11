@@ -22,6 +22,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -126,6 +127,17 @@ type bucket struct {
 	count       int
 }
 
+type commandCache struct {
+	mu      sync.RWMutex
+	entries map[string]cacheEntry
+	ttl     time.Duration
+}
+
+type cacheEntry struct {
+	response  []byte
+	expiresAt time.Time
+}
+
 type rateLimitRule struct {
 	limit  int
 	window time.Duration
@@ -154,6 +166,8 @@ type loginXML struct {
 	ClTRID      string `xml:"command>clTRID"`
 }
 
+var domainNamePattern = regexp.MustCompile(`(?is)<domain:name(?:\s+[^>]*)?>([^<]+)</domain:name>`)
+
 func main() {
 	cfg := loadConfig()
 	logger := log.New(os.Stdout, "[go-epp-proxy] ", log.LstdFlags|log.Lmicroseconds)
@@ -167,6 +181,7 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 	limiter := newRateLimiter(cfg)
+	domainCache := newCommandCache(30 * time.Second)
 	tracker := newConnectionTracker()
 	httpClient := newBackendHTTPClient(cfg)
 	connSlots := make(chan struct{}, max(1, cfg.MaxConns))
@@ -202,7 +217,7 @@ func main() {
 		go func(client net.Conn) {
 			defer wg.Done()
 			defer func() { <-connSlots }()
-			handleConn(cfg, logger, limiter, tracker, httpClient, client)
+			handleConn(cfg, logger, limiter, domainCache, tracker, httpClient, client)
 		}(conn)
 	}
 
@@ -431,7 +446,7 @@ func requiresClientCAVerification(authType tls.ClientAuthType) bool {
 	}
 }
 
-func handleConn(cfg Config, logger *log.Logger, limiter *rateLimiter, tracker *connectionTracker, httpClient *http.Client, client net.Conn) {
+func handleConn(cfg Config, logger *log.Logger, limiter *rateLimiter, domainCache *commandCache, tracker *connectionTracker, httpClient *http.Client, client net.Conn) {
 	defer client.Close()
 	clientID := client.RemoteAddr().String()
 	remoteAddr := remoteIP(client.RemoteAddr())
@@ -557,6 +572,19 @@ func handleConn(cfg Config, logger *log.Logger, limiter *rateLimiter, tracker *c
 				return
 			}
 
+			cacheKey, cacheable := buildDomainReadCacheKey(payload)
+			if cacheable {
+				if cachedBody, ok := domainCache.Get(cacheKey); ok {
+					_ = client.SetWriteDeadline(time.Now().Add(cfg.WriteTimeout))
+					if err = writeEPPPayload(client, cachedBody); err != nil {
+						logEvent(logger, cfg.LogFormat, "error", "write_cached_command_response_failed", map[string]any{"channel": clientID, "error": err.Error()})
+						return
+					}
+					logEvent(logger, cfg.LogFormat, "info", "domain_read_cache_hit", map[string]any{"channel": clientID, "username": username, "cache_key": cacheKey})
+					continue
+				}
+			}
+
 			respBody, callErr := postEPPCommand(httpClient, cfg.CommandBackendURL, token, payload, cfg.BackendResponseMaxBytes)
 			if callErr != nil {
 				logEvent(logger, cfg.LogFormat, "error", "backend_command_failed", map[string]any{"channel": clientID, "username": username, "error": callErr.Error()})
@@ -569,8 +597,71 @@ func handleConn(cfg Config, logger *log.Logger, limiter *rateLimiter, tracker *c
 				logEvent(logger, cfg.LogFormat, "error", "write_command_response_failed", map[string]any{"channel": clientID, "error": err.Error()})
 				return
 			}
+			if cacheable {
+				domainCache.Set(cacheKey, respBody)
+			}
 		}
 	}
+}
+
+func newCommandCache(ttl time.Duration) *commandCache {
+	return &commandCache{entries: make(map[string]cacheEntry), ttl: ttl}
+}
+
+func (c *commandCache) Get(key string) ([]byte, bool) {
+	if strings.TrimSpace(key) == "" {
+		return nil, false
+	}
+	now := time.Now()
+	c.mu.RLock()
+	entry, ok := c.entries[key]
+	c.mu.RUnlock()
+	if !ok {
+		return nil, false
+	}
+	if now.After(entry.expiresAt) {
+		c.mu.Lock()
+		delete(c.entries, key)
+		c.mu.Unlock()
+		return nil, false
+	}
+	return append([]byte(nil), entry.response...), true
+}
+
+func (c *commandCache) Set(key string, response []byte) {
+	if strings.TrimSpace(key) == "" || len(response) == 0 {
+		return
+	}
+	c.mu.Lock()
+	c.entries[key] = cacheEntry{response: append([]byte(nil), response...), expiresAt: time.Now().Add(c.ttl)}
+	c.mu.Unlock()
+}
+
+func buildDomainReadCacheKey(payload []byte) (string, bool) {
+	xmlBody := strings.ToLower(string(payload))
+	if !strings.Contains(xmlBody, "<domain:check") && !strings.Contains(xmlBody, "<domain:info") {
+		return "", false
+	}
+
+	domainName := extractDomainName(payload)
+	if domainName == "" {
+		return "", false
+	}
+
+	commandType := "check"
+	if strings.Contains(xmlBody, "<domain:info") {
+		commandType = "info"
+	}
+
+	return commandType + ":" + domainName, true
+}
+
+func extractDomainName(payload []byte) string {
+	matches := domainNamePattern.FindSubmatch(payload)
+	if len(matches) < 2 {
+		return ""
+	}
+	return strings.ToLower(strings.TrimSpace(string(matches[1])))
 }
 
 func newConnectionTracker() *connectionTracker {
