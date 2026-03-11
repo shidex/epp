@@ -346,7 +346,10 @@ func TestProcessAuthorizationAndCommand(t *testing.T) {
 			t.Fatalf("decode auth request: %v", err)
 		}
 		if req.ServerCertificateHash != "cert-hash" {
-			t.Fatalf("unexpected certificate hash: %q", req.ServerCertificateHash)
+			t.Fatalf("unexpected serverCertificateHash: %q", req.ServerCertificateHash)
+		}
+		if req.HashCertificate != "cert-hash" {
+			t.Fatalf("unexpected hashCertificate: %q", req.HashCertificate)
 		}
 		_, _ = w.Write([]byte(`{"responseCode":"00","eppSessionToken":"tok-1"}`))
 	}))
@@ -387,6 +390,13 @@ func TestProcessAuthorizationIncludesCertificateHashFieldWhenEmpty(t *testing.T)
 		}
 		if got, ok := v.(string); !ok || got != "" {
 			t.Fatalf("unexpected serverCertificateHash value: %#v", v)
+		}
+		legacy, ok := req["hashCertificate"]
+		if !ok {
+			t.Fatal("expected hashCertificate field to be present")
+		}
+		if got, ok := legacy.(string); !ok || got != "" {
+			t.Fatalf("unexpected hashCertificate value: %#v", legacy)
 		}
 		_, _ = w.Write([]byte(`{"responseCode":"00","eppSessionToken":"tok-1"}`))
 	}))
@@ -675,7 +685,7 @@ func TestResolveRegistrarCertificateHashUsesClientCertificateSHA1(t *testing.T) 
 		}
 		expectedRaw := clientDER
 		sum := sha1.Sum(expectedRaw)
-		expectedHash := hex.EncodeToString(sum[:])
+		expectedHash := strings.ToUpper(hex.EncodeToString(sum[:]))
 		if hash != expectedHash {
 			errCh <- fmt.Errorf("unexpected hash: got %q want %q", hash, expectedHash)
 			return

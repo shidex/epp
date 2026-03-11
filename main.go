@@ -135,6 +135,7 @@ type authRequest struct {
 	EppPassword           string `json:"eppPassword,omitempty"`
 	EppNewPassword        string `json:"eppNewPassword,omitempty"`
 	ServerCertificateHash string `json:"serverCertificateHash"`
+	HashCertificate       string `json:"hashCertificate"`
 	IPAddress             string `json:"ipAddress,omitempty"`
 }
 
@@ -662,6 +663,7 @@ func processAuthorization(httpClient *http.Client, authURL, clientIP string, log
 		EppPassword:           loginReq.Password,
 		EppNewPassword:        loginReq.NewPassword,
 		ServerCertificateHash: certificateHash,
+		HashCertificate:       certificateHash,
 		IPAddress:             clientIP,
 	})
 	if err != nil {
@@ -715,7 +717,7 @@ func resolveRegistrarCertificateHash(client net.Conn) (string, error) {
 	}
 
 	sum := sha1.Sum(state.PeerCertificates[0].Raw)
-	return hex.EncodeToString(sum[:]), nil
+	return strings.ToUpper(hex.EncodeToString(sum[:])), nil
 }
 
 func postEPPCommand(httpClient *http.Client, backendURL, token string, payload []byte, maxResponseBytes int64) ([]byte, error) {
