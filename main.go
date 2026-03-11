@@ -45,6 +45,8 @@ type Config struct {
 	TLSClientAuth              tls.ClientAuthType
 	AuthBackendURL             string
 	CommandBackendURL          string
+	ReadBackendURL             string
+	WriteBackendURL            string
 	LogoutBackendURL           string
 	IPRateLimitRules           []rateLimitRule
 	ClientRateLimit            []rateLimitRule
@@ -188,7 +190,7 @@ func main() {
 	httpClient := newBackendHTTPClient(cfg)
 	connSlots := make(chan struct{}, max(1, cfg.MaxConns))
 
-	logEvent(logger, cfg.LogFormat, "info", "service_started", map[string]any{"listen_addr": cfg.ListenAddr, "auth_url": cfg.AuthBackendURL, "command_url": cfg.CommandBackendURL, "max_conns": cfg.MaxConns})
+	logEvent(logger, cfg.LogFormat, "info", "service_started", map[string]any{"listen_addr": cfg.ListenAddr, "auth_url": cfg.AuthBackendURL, "command_url": cfg.CommandBackendURL, "command_read_url": cfg.ReadBackendURL, "command_write_url": cfg.WriteBackendURL, "max_conns": cfg.MaxConns})
 	stopStatsWriter := startRealtimeStatsWriter(ctx, logger, cfg, tracker)
 	defer stopStatsWriter()
 
@@ -246,6 +248,8 @@ func loadConfig() Config {
 	tlsClientAuth := flag.String("tls-client-auth", strings.ToUpper(envOrFirst([]string{"TLS_CLIENT_AUTH", "EPP_TLS_CLIENT_AUTH"}, "REQUIRE")), "TLS client certificate mode: NONE, OPTIONAL, REQUIRE")
 	authURL := flag.String("auth-url", envOrFirst([]string{"AUTHBACKEND_URL", "EPP_AUTH_URL"}, "http://localhost:8080/PANDI-REGISTRAR-0.1/authRegistrar/"), "backend auth URL")
 	commandURL := flag.String("command-url", envOrFirst([]string{"BACKEND_URL", "EPP_COMMAND_URL"}, "http://localhost:8080/PANDI-CORE-0.1/processepp/"), "backend command URL")
+	commandReadURL := flag.String("command-read-url", envOrFirst([]string{"BACKEND_READ_URL", "EPP_COMMAND_READ_URL", "BACKEND_URL", "EPP_COMMAND_URL"}, "http://localhost:8080/PANDI-CORE-0.1/processepp/"), "backend URL for read commands")
+	commandWriteURL := flag.String("command-write-url", envOrFirst([]string{"BACKEND_WRITE_URL", "EPP_COMMAND_WRITE_URL", "BACKEND_URL", "EPP_COMMAND_URL"}, "http://localhost:8080/PANDI-CORE-0.1/processepp/"), "backend URL for write commands")
 	logoutURL := flag.String("logout-url", envOrFirst([]string{"LOGOUTBACKEND_URL", "EPP_LOGOUT_URL"}, "http://localhost:8080/PANDI-REGISTRAR-0.1/logoutRegistrar/"), "backend logout URL")
 	rateLimitIP := flag.String("rate-limit-ip", envOrFirst([]string{"RATELIMIT_IP_RULES", "EPP_RATE_LIMIT_IP_RULES"}, "10/second,60/minute"), "rate limit rules by IP")
 	rateLimitClient := flag.String("rate-limit-client", envOrFirst([]string{"RATELIMIT_CLIENT_RULES", "EPP_RATE_LIMIT_CLIENT_RULES"}, "50/second,500/minute"), "rate limit rules by client ID")
@@ -285,6 +289,8 @@ func loadConfig() Config {
 		TLSClientAuth:              parseTLSClientAuth(*tlsClientAuth),
 		AuthBackendURL:             *authURL,
 		CommandBackendURL:          *commandURL,
+		ReadBackendURL:             *commandReadURL,
+		WriteBackendURL:            *commandWriteURL,
 		LogoutBackendURL:           *logoutURL,
 		IPRateLimitRules:           parseRateLimitRules(*rateLimitIP),
 		ClientRateLimit:            parseRateLimitRules(*rateLimitClient),
@@ -576,6 +582,8 @@ func handleConn(cfg Config, logger *log.Logger, limiter *rateLimiter, domainCach
 				return
 			}
 
+			backendURL := resolveCommandBackendURL(cfg, commandType)
+
 			cacheKey, cacheable := buildDomainReadCacheKey(payload)
 			if cacheable {
 				cachedBody, hit, waitCh, reserved := domainCache.GetOrReserve(cacheKey)
@@ -604,7 +612,7 @@ func handleConn(cfg Config, logger *log.Logger, limiter *rateLimiter, domainCach
 				}
 
 				if reserved {
-					respBody, callErr := postEPPCommand(httpClient, cfg.CommandBackendURL, token, payload, cfg.BackendResponseMaxBytes)
+					respBody, callErr := postEPPCommand(httpClient, backendURL, token, payload, cfg.BackendResponseMaxBytes)
 					if callErr != nil {
 						domainCache.CompleteReservation(cacheKey, nil)
 						logEvent(logger, cfg.LogFormat, "error", "backend_command_failed", map[string]any{"channel": clientID, "username": username, "error": callErr.Error()})
@@ -622,7 +630,7 @@ func handleConn(cfg Config, logger *log.Logger, limiter *rateLimiter, domainCach
 				}
 			}
 
-			respBody, callErr := postEPPCommand(httpClient, cfg.CommandBackendURL, token, payload, cfg.BackendResponseMaxBytes)
+			respBody, callErr := postEPPCommand(httpClient, backendURL, token, payload, cfg.BackendResponseMaxBytes)
 			if callErr != nil {
 				logEvent(logger, cfg.LogFormat, "error", "backend_command_failed", map[string]any{"channel": clientID, "username": username, "error": callErr.Error()})
 				_ = client.SetWriteDeadline(time.Now().Add(cfg.WriteTimeout))
@@ -1077,6 +1085,20 @@ func (r *rateLimiter) AllowWithReason(ip, username, channelID, commandType strin
 	default:
 		return true, ""
 	}
+}
+
+func resolveCommandBackendURL(cfg Config, commandType string) string {
+	switch commandType {
+	case "read":
+		if strings.TrimSpace(cfg.ReadBackendURL) != "" {
+			return cfg.ReadBackendURL
+		}
+	case "write":
+		if strings.TrimSpace(cfg.WriteBackendURL) != "" {
+			return cfg.WriteBackendURL
+		}
+	}
+	return cfg.CommandBackendURL
 }
 
 func classifyCommandType(payload []byte) string {
