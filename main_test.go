@@ -526,6 +526,41 @@ func TestNewBackendHTTPClient(t *testing.T) {
 	}
 }
 
+
+
+func TestResolveServerCertificateHashUsesSHA1(t *testing.T) {
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("generate key failed: %v", err)
+	}
+
+	tpl := &x509.Certificate{
+		SerialNumber: big.NewInt(99),
+		Subject:      pkix.Name{CommonName: "sha1-test"},
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(24 * time.Hour),
+		KeyUsage:     x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tpl, tpl, &key.PublicKey, key)
+	if err != nil {
+		t.Fatalf("create cert failed: %v", err)
+	}
+
+	dir := t.TempDir()
+	certPath := dir + "/server.pem"
+	if err := os.WriteFile(certPath, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), 0o644); err != nil {
+		t.Fatalf("write cert failed: %v", err)
+	}
+
+	hash, err := resolveServerCertificateHash(Config{FrontendTLS: true, FrontendCert: certPath})
+	if err != nil {
+		t.Fatalf("resolveServerCertificateHash failed: %v", err)
+	}
+	if len(hash) != 40 {
+		t.Fatalf("expected SHA-1 hash length of 40, got %d (%q)", len(hash), hash)
+	}
+}
 func TestBuildListenerTLSSkipsCAWhenClientAuthNone(t *testing.T) {
 	rootKey, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {

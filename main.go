@@ -4,7 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
-	"crypto/sha256"
+	"crypto/sha1"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/binary"
@@ -714,7 +714,7 @@ func resolveServerCertificateHash(cfg Config) (string, error) {
 		return "", err
 	}
 
-	sum := sha256.Sum256(cert.Raw)
+	sum := sha1.Sum(cert.Raw)
 	return hex.EncodeToString(sum[:]), nil
 }
 
