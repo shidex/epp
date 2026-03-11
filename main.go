@@ -582,7 +582,7 @@ func handleConn(cfg Config, logger *log.Logger, limiter *rateLimiter, domainCach
 				return
 			}
 
-			backendURL := resolveCommandBackendURL(cfg, commandType)
+			backendURL := resolveCommandBackendURL(cfg, payload)
 
 			cacheKey, cacheable := buildDomainReadCacheKey(payload)
 			if cacheable {
@@ -1087,8 +1087,8 @@ func (r *rateLimiter) AllowWithReason(ip, username, channelID, commandType strin
 	}
 }
 
-func resolveCommandBackendURL(cfg Config, commandType string) string {
-	switch commandType {
+func resolveCommandBackendURL(cfg Config, payload []byte) string {
+	switch classifyObjectCommandType(payload) {
 	case "read":
 		if strings.TrimSpace(cfg.ReadBackendURL) != "" {
 			return cfg.ReadBackendURL
@@ -1098,7 +1098,27 @@ func resolveCommandBackendURL(cfg Config, commandType string) string {
 			return cfg.WriteBackendURL
 		}
 	}
+
 	return cfg.CommandBackendURL
+}
+
+func classifyObjectCommandType(payload []byte) string {
+	xmlBody := strings.ToLower(string(payload))
+	objects := []string{"domain", "host", "contact"}
+	writeVerbs := []string{"create", "update", "renew", "delete", "transfer"}
+
+	for _, obj := range objects {
+		for _, verb := range writeVerbs {
+			if strings.Contains(xmlBody, "<"+obj+":"+verb) {
+				return "write"
+			}
+		}
+		if strings.Contains(xmlBody, "<"+obj+":check") || strings.Contains(xmlBody, "<"+obj+":info") {
+			return "read"
+		}
+	}
+
+	return ""
 }
 
 func classifyCommandType(payload []byte) string {

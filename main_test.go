@@ -321,6 +321,29 @@ func TestClassifyCommandType(t *testing.T) {
 	}
 }
 
+func TestClassifyObjectCommandType(t *testing.T) {
+	tests := []struct {
+		name string
+		xml  string
+		want string
+	}{
+		{name: "domain check", xml: `<epp><command><check><domain:check/></check></command></epp>`, want: "read"},
+		{name: "host info", xml: `<epp><command><info><host:info/></info></command></epp>`, want: "read"},
+		{name: "contact create", xml: `<epp><command><create><contact:create/></create></command></epp>`, want: "write"},
+		{name: "poll default", xml: `<epp><command><poll op="req"/></command></epp>`, want: ""},
+		{name: "login default", xml: `<epp><command><login/></command></epp>`, want: ""},
+		{name: "unknown object default", xml: `<epp><command><check><secdns:check/></check></command></epp>`, want: ""},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := classifyObjectCommandType([]byte(tc.xml)); got != tc.want {
+				t.Fatalf("expected %q got %q", tc.want, got)
+			}
+		})
+	}
+}
+
 func TestResolveCommandBackendURL(t *testing.T) {
 	cfg := Config{
 		CommandBackendURL: "http://default-backend",
@@ -328,22 +351,22 @@ func TestResolveCommandBackendURL(t *testing.T) {
 		WriteBackendURL:   "http://write-backend",
 	}
 
-	if got := resolveCommandBackendURL(cfg, "read"); got != "http://read-backend" {
+	if got := resolveCommandBackendURL(cfg, []byte(`<epp><command><check><domain:check/></check></command></epp>`)); got != "http://read-backend" {
 		t.Fatalf("expected read backend, got %q", got)
 	}
-	if got := resolveCommandBackendURL(cfg, "write"); got != "http://write-backend" {
+	if got := resolveCommandBackendURL(cfg, []byte(`<epp><command><create><host:create/></create></command></epp>`)); got != "http://write-backend" {
 		t.Fatalf("expected write backend, got %q", got)
 	}
-	if got := resolveCommandBackendURL(cfg, "unknown"); got != "http://default-backend" {
-		t.Fatalf("expected default backend for unknown command type, got %q", got)
+	if got := resolveCommandBackendURL(cfg, []byte(`<epp><command><poll op="req"/></command></epp>`)); got != "http://default-backend" {
+		t.Fatalf("expected default backend for unsupported command, got %q", got)
 	}
 
 	cfg.ReadBackendURL = ""
 	cfg.WriteBackendURL = ""
-	if got := resolveCommandBackendURL(cfg, "read"); got != "http://default-backend" {
+	if got := resolveCommandBackendURL(cfg, []byte(`<epp><command><check><domain:check/></check></command></epp>`)); got != "http://default-backend" {
 		t.Fatalf("expected default backend fallback for read, got %q", got)
 	}
-	if got := resolveCommandBackendURL(cfg, "write"); got != "http://default-backend" {
+	if got := resolveCommandBackendURL(cfg, []byte(`<epp><command><create><host:create/></create></command></epp>`)); got != "http://default-backend" {
 		t.Fatalf("expected default backend fallback for write, got %q", got)
 	}
 }

@@ -42,9 +42,10 @@ Contoh tersedia di `env.example`.
 
 
 ### Routing backend command read/write
-- `BACKEND_READ_URL` dipakai untuk command bertipe read (`check`, `info`, `poll`, `login/logout`).
-- `BACKEND_WRITE_URL` dipakai untuk command bertipe write (`create`, `update`, `renew`, `delete`, `transfer`).
-- Jika salah satu tidak diisi, proxy fallback ke `BACKEND_URL` agar tetap backward compatible.
+- `BACKEND_READ_URL` dipakai **hanya** untuk command object `domain`, `host`, `contact` dengan operasi read (`check`, `info`).
+- `BACKEND_WRITE_URL` dipakai **hanya** untuk command object `domain`, `host`, `contact` dengan operasi write (`create`, `update`, `renew`, `delete`, `transfer`).
+- Command lain yang belum didefinisikan (contoh: `login`, `logout`, `poll`, extension command lain) akan tetap ke `BACKEND_URL` (default backend).
+- Jika salah satu env read/write tidak diisi, proxy fallback ke `BACKEND_URL` agar tetap backward compatible.
 
 ### Penjelasan fungsi setiap setting rate limit
 
