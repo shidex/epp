@@ -10,6 +10,7 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
+	"encoding/pem"
 	"encoding/xml"
 	"errors"
 	"flag"
@@ -136,6 +137,7 @@ type authRequest struct {
 	EppNewPassword        string `json:"eppNewPassword,omitempty"`
 	ServerCertificateHash string `json:"serverCertificateHash"`
 	HashCertificate       string `json:"hashCertificate"`
+	ClientCertificate     string `json:"clientCertificate,omitempty"`
 	IPAddress             string `json:"ipAddress,omitempty"`
 }
 
@@ -405,7 +407,7 @@ func buildListener(cfg Config) (net.Listener, error) {
 
 	tlsCfg := &tls.Config{Certificates: []tls.Certificate{certificate}, ClientAuth: cfg.TLSClientAuth, MinVersion: tls.VersionTLS12}
 
-	if cfg.TLSClientAuth != tls.NoClientCert {
+	if cfg.TLSClientAuth == tls.VerifyClientCertIfGiven || cfg.TLSClientAuth == tls.RequireAndVerifyClientCert {
 		caBytes, err := os.ReadFile(cfg.FrontendCA)
 		if err != nil {
 			return nil, err
@@ -425,6 +427,7 @@ func handleConn(cfg Config, logger *log.Logger, limiter *rateLimiter, tracker *c
 	clientID := client.RemoteAddr().String()
 	remoteAddr := remoteIP(client.RemoteAddr())
 	certificateHash := ""
+	certificatePEM := ""
 	tracker.connectionOpened(remoteAddr)
 	defer tracker.connectionClosed(remoteAddr)
 
@@ -493,14 +496,15 @@ func handleConn(cfg Config, logger *log.Logger, limiter *rateLimiter, tracker *c
 				}
 			}
 
-			if strings.TrimSpace(certificateHash) == "" {
-				logEvent(logger, cfg.LogFormat, "warn", "auth_failed_missing_client_certificate_hash", map[string]any{"channel": clientID, "remote_ip": remoteAddr, "username": loginReq.ClientID})
-				_ = client.SetWriteDeadline(time.Now().Add(cfg.WriteTimeout))
-				_ = writeEPPPayload(client, []byte(buildAuthFailResponse()))
-				return
+			if strings.TrimSpace(certificatePEM) == "" {
+				var certErr error
+				certificatePEM, certErr = resolveRegistrarCertificatePEM(client)
+				if certErr != nil {
+					logEvent(logger, cfg.LogFormat, "warn", "client_certificate_unavailable", map[string]any{"channel": clientID, "remote_ip": remoteAddr, "error": certErr.Error()})
+				}
 			}
 
-			tok, ok := processAuthorization(httpClient, cfg.AuthBackendURL, remoteAddr, loginReq, certificateHash, cfg.BackendResponseMaxBytes)
+			tok, ok := processAuthorization(httpClient, cfg.AuthBackendURL, remoteAddr, loginReq, certificateHash, certificatePEM, cfg.BackendResponseMaxBytes)
 			if !ok {
 				logEvent(logger, cfg.LogFormat, "warn", "auth_failed", map[string]any{"channel": clientID, "remote_ip": remoteAddr, "username": loginReq.ClientID})
 				_ = client.SetWriteDeadline(time.Now().Add(cfg.WriteTimeout))
@@ -662,13 +666,14 @@ func decrementKey(source map[string]int, key string) {
 	source[key]--
 }
 
-func processAuthorization(httpClient *http.Client, authURL, clientIP string, loginReq loginXML, certificateHash string, maxResponseBytes int64) (string, bool) {
+func processAuthorization(httpClient *http.Client, authURL, clientIP string, loginReq loginXML, certificateHash, clientCertificate string, maxResponseBytes int64) (string, bool) {
 	payload, err := json.Marshal(authRequest{
 		EppUsername:           loginReq.ClientID,
 		EppPassword:           loginReq.Password,
 		EppNewPassword:        loginReq.NewPassword,
 		ServerCertificateHash: certificateHash,
 		HashCertificate:       certificateHash,
+		ClientCertificate:     clientCertificate,
 		IPAddress:             clientIP,
 	})
 	if err != nil {
@@ -707,21 +712,39 @@ func processAuthorization(httpClient *http.Client, authURL, clientIP string, log
 }
 
 func resolveRegistrarCertificateHash(client net.Conn) (string, error) {
+	cert, err := resolveRegistrarCertificate(client)
+	if err != nil || cert == nil {
+		return "", err
+	}
+
+	sum := sha1.Sum(cert.Raw)
+	return strings.ToUpper(hex.EncodeToString(sum[:])), nil
+}
+
+func resolveRegistrarCertificatePEM(client net.Conn) (string, error) {
+	cert, err := resolveRegistrarCertificate(client)
+	if err != nil || cert == nil {
+		return "", err
+	}
+
+	return string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: cert.Raw})), nil
+}
+
+func resolveRegistrarCertificate(client net.Conn) (*x509.Certificate, error) {
 	tlsConn, ok := client.(*tls.Conn)
 	if !ok {
-		return "", nil
+		return nil, nil
 	}
 
 	state := tlsConn.ConnectionState()
 	if !state.HandshakeComplete {
-		return "", fmt.Errorf("tls handshake not complete")
+		return nil, fmt.Errorf("tls handshake not complete")
 	}
 	if len(state.PeerCertificates) == 0 {
-		return "", fmt.Errorf("no registrar certificate presented by client")
+		return nil, fmt.Errorf("no registrar certificate presented by client")
 	}
 
-	sum := sha1.Sum(state.PeerCertificates[0].Raw)
-	return strings.ToUpper(hex.EncodeToString(sum[:])), nil
+	return state.PeerCertificates[0], nil
 }
 
 func postEPPCommand(httpClient *http.Client, backendURL, token string, payload []byte, maxResponseBytes int64) ([]byte, error) {
@@ -1150,9 +1173,9 @@ func parseTLSClientAuth(mode string) tls.ClientAuthType {
 	case "NONE":
 		return tls.NoClientCert
 	case "OPTIONAL":
-		return tls.VerifyClientCertIfGiven
+		return tls.RequestClientCert
 	default:
-		return tls.RequireAndVerifyClientCert
+		return tls.RequireAnyClientCert
 	}
 }
 
