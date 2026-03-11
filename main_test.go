@@ -81,6 +81,21 @@ func TestParseRateLimitRules(t *testing.T) {
 	}
 }
 
+func TestRequiresClientCAVerification(t *testing.T) {
+	if !requiresClientCAVerification(tls.VerifyClientCertIfGiven) {
+		t.Fatal("expected VerifyClientCertIfGiven to require CA verification")
+	}
+	if !requiresClientCAVerification(tls.RequireAndVerifyClientCert) {
+		t.Fatal("expected RequireAndVerifyClientCert to require CA verification")
+	}
+	if requiresClientCAVerification(tls.RequestClientCert) {
+		t.Fatal("expected RequestClientCert to not require CA verification")
+	}
+	if requiresClientCAVerification(tls.RequireAnyClientCert) {
+		t.Fatal("expected RequireAnyClientCert to not require CA verification")
+	}
+}
+
 func TestParseTLSClientAuth(t *testing.T) {
 	if got := parseTLSClientAuth("NONE"); got != tls.NoClientCert {
 		t.Fatalf("unexpected client auth for NONE: %v", got)
@@ -400,6 +415,13 @@ func TestProcessAuthorizationIncludesCertificateHashFieldWhenEmpty(t *testing.T)
 		}
 		if got, ok := legacy.(string); !ok || got != "" {
 			t.Fatalf("unexpected hashCertificate value: %#v", legacy)
+		}
+		cert, ok := req["clientCertificate"]
+		if !ok {
+			t.Fatal("expected clientCertificate field to be present")
+		}
+		if got, ok := cert.(string); !ok || got != "" {
+			t.Fatalf("unexpected clientCertificate value: %#v", cert)
 		}
 		_, _ = w.Write([]byte(`{"responseCode":"00","eppSessionToken":"tok-1"}`))
 	}))

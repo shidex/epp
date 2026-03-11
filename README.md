@@ -99,8 +99,8 @@ Catatan balancing yang dipakai:
 ## TLS frontend (sertifikat chain)
 - `TLS_SERVER_CERT` dapat berisi **full chain** dalam satu file PEM (urutan: leaf certificate lalu intermediate CA). Ini direkomendasikan agar klien dari luar menerima chain lengkap saat handshake.
 - `TLS_SERVER_KEY` tetap private key untuk leaf certificate.
-- `TLS_CA_CERT` dipakai untuk verifikasi **client certificate** saat `TLS_CLIENT_AUTH` = `OPTIONAL` atau `REQUIRE` (mTLS).
-- Jika `TLS_CLIENT_AUTH=NONE`, maka `TLS_CA_CERT` **boleh diabaikan** (tidak dibaca listener).
+- `TLS_CA_CERT` hanya dipakai jika mode verifikasi chain cert client aktif (`VerifyClientCertIfGiven` / `RequireAndVerifyClientCert`).
+- Pada mapping mode saat ini (`TLS_CLIENT_AUTH=NONE|OPTIONAL|REQUIRE` -> `NoClientCert|RequestClientCert|RequireAnyClientCert`), `TLS_CA_CERT` tidak dipakai untuk verifikasi lokal dan alur pencocokan cert diteruskan ke backend auth.
 - Listener dipaksa minimal TLS 1.2.
 - Hash sertifikat yang dikirim ke backend auth diambil dari **client certificate registrar** (`PeerCertificates[0]` pada koneksi TLS sisi server), jadi ini alur **mTLS/mutual TLS** (bukan hash sertifikat server/proxy).
 
@@ -166,7 +166,7 @@ Penjelasan singkat:
 ## Catatan hardening DDoS
 - Mulai tuning dari `RATELIMIT_IP_RULES` + `RATELIMIT_CHANNEL_RULES` untuk menahan burst awal.
 - Pisahkan read/write limit dengan `RATELIMIT_READ_*` dan `RATELIMIT_WRITE_*` agar operasi write lebih ketat.
-- Aktifkan mTLS (`SERVER_SSL_ENABLED=true` + `TLS_CLIENT_AUTH=REQUIRE`) agar hanya registrar resmi yang bisa connect.
+- Aktifkan TLS frontend (`SERVER_SSL_ENABLED=true`). Dengan `TLS_CLIENT_AUTH=REQUIRE`, client wajib mengirim cert; validasi kecocokan cert + username/password + IP dilakukan di backend auth.
 - Set `EPP_MAX_CONNS` sesuai kapasitas CPU/RAM host.
 - Untuk target throughput tinggi, aktifkan keep-alive backend dan tuning pool koneksi (`EPP_BACKEND_MAX_IDLE_CONNS*`) agar tidak terjadi bottleneck saat burst request.
 - Pastikan firewall/L4 LB juga punya proteksi SYN flood dan connection limit per source IP.

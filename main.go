@@ -137,7 +137,7 @@ type authRequest struct {
 	EppNewPassword        string `json:"eppNewPassword,omitempty"`
 	ServerCertificateHash string `json:"serverCertificateHash"`
 	HashCertificate       string `json:"hashCertificate"`
-	ClientCertificate     string `json:"clientCertificate,omitempty"`
+	ClientCertificate     string `json:"clientCertificate"`
 	IPAddress             string `json:"ipAddress,omitempty"`
 }
 
@@ -407,7 +407,7 @@ func buildListener(cfg Config) (net.Listener, error) {
 
 	tlsCfg := &tls.Config{Certificates: []tls.Certificate{certificate}, ClientAuth: cfg.TLSClientAuth, MinVersion: tls.VersionTLS12}
 
-	if cfg.TLSClientAuth == tls.VerifyClientCertIfGiven || cfg.TLSClientAuth == tls.RequireAndVerifyClientCert {
+	if requiresClientCAVerification(cfg.TLSClientAuth) {
 		caBytes, err := os.ReadFile(cfg.FrontendCA)
 		if err != nil {
 			return nil, err
@@ -422,12 +422,29 @@ func buildListener(cfg Config) (net.Listener, error) {
 	return tls.Listen("tcp", cfg.ListenAddr, tlsCfg)
 }
 
+func requiresClientCAVerification(authType tls.ClientAuthType) bool {
+	switch authType {
+	case tls.VerifyClientCertIfGiven, tls.RequireAndVerifyClientCert:
+		return true
+	default:
+		return false
+	}
+}
+
 func handleConn(cfg Config, logger *log.Logger, limiter *rateLimiter, tracker *connectionTracker, httpClient *http.Client, client net.Conn) {
 	defer client.Close()
 	clientID := client.RemoteAddr().String()
 	remoteAddr := remoteIP(client.RemoteAddr())
 	certificateHash := ""
 	certificatePEM := ""
+	if tlsConn, ok := client.(*tls.Conn); ok {
+		if err := tlsConn.Handshake(); err != nil {
+			logEvent(logger, cfg.LogFormat, "warn", "tls_handshake_failed", map[string]any{"channel": clientID, "remote_ip": remoteAddr, "error": err.Error()})
+			return
+		}
+		certificateHash, _ = resolveRegistrarCertificateHash(tlsConn)
+		certificatePEM, _ = resolveRegistrarCertificatePEM(tlsConn)
+	}
 	tracker.connectionOpened(remoteAddr)
 	defer tracker.connectionClosed(remoteAddr)
 
@@ -737,9 +754,6 @@ func resolveRegistrarCertificate(client net.Conn) (*x509.Certificate, error) {
 	}
 
 	state := tlsConn.ConnectionState()
-	if !state.HandshakeComplete {
-		return nil, fmt.Errorf("tls handshake not complete")
-	}
 	if len(state.PeerCertificates) == 0 {
 		return nil, fmt.Errorf("no registrar certificate presented by client")
 	}
