@@ -6,10 +6,12 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/rsa"
+	"crypto/sha1"
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
@@ -526,39 +528,149 @@ func TestNewBackendHTTPClient(t *testing.T) {
 	}
 }
 
+func TestResolveRegistrarCertificateHashNonTLSConn(t *testing.T) {
+	serverConn, clientConn := net.Pipe()
+	defer serverConn.Close()
+	defer clientConn.Close()
 
-
-func TestResolveServerCertificateHashUsesSHA1(t *testing.T) {
-	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	hash, err := resolveRegistrarCertificateHash(serverConn)
 	if err != nil {
-		t.Fatalf("generate key failed: %v", err)
+		t.Fatalf("resolveRegistrarCertificateHash returned error for non-TLS conn: %v", err)
+	}
+	if hash != "" {
+		t.Fatalf("expected empty hash for non-TLS conn, got %q", hash)
+	}
+}
+
+func TestResolveRegistrarCertificateHashUsesClientCertificateSHA1(t *testing.T) {
+	caKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("generate CA key failed: %v", err)
+	}
+	caTpl := &x509.Certificate{
+		SerialNumber:          big.NewInt(91),
+		Subject:               pkix.Name{CommonName: "test-ca"},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(24 * time.Hour),
+		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
+		IsCA:                  true,
+		BasicConstraintsValid: true,
+	}
+	caDER, err := x509.CreateCertificate(rand.Reader, caTpl, caTpl, &caKey.PublicKey, caKey)
+	if err != nil {
+		t.Fatalf("create CA cert failed: %v", err)
+	}
+	caCert, err := x509.ParseCertificate(caDER)
+	if err != nil {
+		t.Fatalf("parse CA cert failed: %v", err)
 	}
 
-	tpl := &x509.Certificate{
-		SerialNumber: big.NewInt(99),
-		Subject:      pkix.Name{CommonName: "sha1-test"},
+	serverKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("generate server key failed: %v", err)
+	}
+	serverTpl := &x509.Certificate{
+		SerialNumber: big.NewInt(92),
+		Subject:      pkix.Name{CommonName: "127.0.0.1"},
+		IPAddresses:  []net.IP{net.ParseIP("127.0.0.1")},
 		NotBefore:    time.Now().Add(-time.Hour),
 		NotAfter:     time.Now().Add(24 * time.Hour),
 		KeyUsage:     x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
 		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
 	}
-	der, err := x509.CreateCertificate(rand.Reader, tpl, tpl, &key.PublicKey, key)
+	serverDER, err := x509.CreateCertificate(rand.Reader, serverTpl, caCert, &serverKey.PublicKey, caKey)
 	if err != nil {
-		t.Fatalf("create cert failed: %v", err)
+		t.Fatalf("create server cert failed: %v", err)
+	}
+	serverTLSCert, err := tls.X509KeyPair(
+		pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: serverDER}),
+		pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(serverKey)}),
+	)
+	if err != nil {
+		t.Fatalf("load server key pair failed: %v", err)
 	}
 
-	dir := t.TempDir()
-	certPath := dir + "/server.pem"
-	if err := os.WriteFile(certPath, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), 0o644); err != nil {
-		t.Fatalf("write cert failed: %v", err)
+	clientKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("generate client key failed: %v", err)
+	}
+	clientTpl := &x509.Certificate{
+		SerialNumber: big.NewInt(93),
+		Subject:      pkix.Name{CommonName: "registrar-client"},
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(24 * time.Hour),
+		KeyUsage:     x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
+	}
+	clientDER, err := x509.CreateCertificate(rand.Reader, clientTpl, caCert, &clientKey.PublicKey, caKey)
+	if err != nil {
+		t.Fatalf("create client cert failed: %v", err)
+	}
+	clientTLSCert, err := tls.X509KeyPair(
+		pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: clientDER}),
+		pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(clientKey)}),
+	)
+	if err != nil {
+		t.Fatalf("load client key pair failed: %v", err)
 	}
 
-	hash, err := resolveServerCertificateHash(Config{FrontendTLS: true, FrontendCert: certPath})
+	caPool := x509.NewCertPool()
+	caPool.AddCert(caCert)
+
+	ln, err := tls.Listen("tcp", "127.0.0.1:0", &tls.Config{
+		Certificates: []tls.Certificate{serverTLSCert},
+		ClientAuth:   tls.RequireAndVerifyClientCert,
+		ClientCAs:    caPool,
+	})
 	if err != nil {
-		t.Fatalf("resolveServerCertificateHash failed: %v", err)
+		t.Fatalf("tls listen failed: %v", err)
 	}
-	if len(hash) != 40 {
-		t.Fatalf("expected SHA-1 hash length of 40, got %d (%q)", len(hash), hash)
+	defer ln.Close()
+
+	errCh := make(chan error, 1)
+	go func() {
+		conn, acceptErr := ln.Accept()
+		if acceptErr != nil {
+			errCh <- acceptErr
+			return
+		}
+		defer conn.Close()
+		tlsConn, ok := conn.(*tls.Conn)
+		if !ok {
+			errCh <- fmt.Errorf("expected *tls.Conn, got %T", conn)
+			return
+		}
+		if hsErr := tlsConn.Handshake(); hsErr != nil {
+			errCh <- hsErr
+			return
+		}
+		hash, hashErr := resolveRegistrarCertificateHash(tlsConn)
+		if hashErr != nil {
+			errCh <- hashErr
+			return
+		}
+		expectedRaw := clientDER
+		sum := sha1.Sum(expectedRaw)
+		expectedHash := hex.EncodeToString(sum[:])
+		if hash != expectedHash {
+			errCh <- fmt.Errorf("unexpected hash: got %q want %q", hash, expectedHash)
+			return
+		}
+		errCh <- nil
+	}()
+
+	conn, err := tls.Dial("tcp", ln.Addr().String(), &tls.Config{
+		Certificates:       []tls.Certificate{clientTLSCert},
+		RootCAs:            caPool,
+		InsecureSkipVerify: true,
+	})
+	if err != nil {
+		t.Fatalf("client dial failed: %v", err)
+	}
+	_ = conn.Close()
+
+	if err := <-errCh; err != nil {
+		t.Fatalf("server validation failed: %v", err)
 	}
 }
 func TestBuildListenerTLSSkipsCAWhenClientAuthNone(t *testing.T) {
