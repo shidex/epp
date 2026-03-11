@@ -357,8 +357,14 @@ func TestResolveCommandBackendURL(t *testing.T) {
 	if got := resolveCommandBackendURL(cfg, []byte(`<epp><command><create><host:create/></create></command></epp>`)); got != "http://write-backend" {
 		t.Fatalf("expected write backend, got %q", got)
 	}
-	if got := resolveCommandBackendURL(cfg, []byte(`<epp><command><poll op="req"/></command></epp>`)); got != "http://default-backend" {
-		t.Fatalf("expected default backend for unsupported command, got %q", got)
+	if got := resolveCommandBackendURL(cfg, []byte(`<epp><command><poll op="req"/></command></epp>`)); got != "http://read-backend" {
+		t.Fatalf("expected read backend for poll command, got %q", got)
+	}
+	if got := resolveCommandBackendURL(cfg, []byte(`<epp><command><check><secdns:check/></check></command></epp>`)); got != "http://read-backend" {
+		t.Fatalf("expected read backend for generic check command, got %q", got)
+	}
+	if got := resolveCommandBackendURL(cfg, []byte(`<epp><command><extension><foo:bar/></extension></command></epp>`)); got != "http://default-backend" {
+		t.Fatalf("expected default backend for unclassified command, got %q", got)
 	}
 
 	cfg.ReadBackendURL = ""
