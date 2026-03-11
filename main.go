@@ -1088,7 +1088,7 @@ func (r *rateLimiter) AllowWithReason(ip, username, channelID, commandType strin
 }
 
 func resolveCommandBackendURL(cfg Config, payload []byte) string {
-	switch classifyObjectCommandType(payload) {
+	switch classifyCommandType(payload) {
 	case "read":
 		if strings.TrimSpace(cfg.ReadBackendURL) != "" {
 			return cfg.ReadBackendURL
