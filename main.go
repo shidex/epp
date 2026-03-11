@@ -10,6 +10,7 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
+	"encoding/pem"
 	"encoding/xml"
 	"errors"
 	"flag"
@@ -154,6 +155,10 @@ type loginXML struct {
 func main() {
 	cfg := loadConfig()
 	logger := log.New(os.Stdout, "[go-epp-proxy] ", log.LstdFlags|log.Lmicroseconds)
+	serverCertHash, err := resolveServerCertificateHash(cfg)
+	if err != nil {
+		logger.Fatalf("failed to compute server certificate hash: %v", err)
+	}
 
 	ln, err := buildListener(cfg)
 	if err != nil {
@@ -199,7 +204,7 @@ func main() {
 		go func(client net.Conn) {
 			defer wg.Done()
 			defer func() { <-connSlots }()
-			handleConn(cfg, logger, limiter, tracker, httpClient, client)
+			handleConn(cfg, logger, limiter, tracker, httpClient, client, serverCertHash)
 		}(conn)
 	}
 
@@ -419,11 +424,11 @@ func buildListener(cfg Config) (net.Listener, error) {
 	return tls.Listen("tcp", cfg.ListenAddr, tlsCfg)
 }
 
-func handleConn(cfg Config, logger *log.Logger, limiter *rateLimiter, tracker *connectionTracker, httpClient *http.Client, client net.Conn) {
+func handleConn(cfg Config, logger *log.Logger, limiter *rateLimiter, tracker *connectionTracker, httpClient *http.Client, client net.Conn, serverCertificateHash string) {
 	defer client.Close()
 	clientID := client.RemoteAddr().String()
 	remoteAddr := remoteIP(client.RemoteAddr())
-	certificateHash := clientCertificateHash(client)
+	certificateHash := serverCertificateHash
 	tracker.connectionOpened(remoteAddr)
 	defer tracker.connectionClosed(remoteAddr)
 
@@ -689,19 +694,28 @@ func processAuthorization(httpClient *http.Client, authURL, clientIP string, log
 	return parsed.EppSessionToken, true
 }
 
-func clientCertificateHash(conn net.Conn) string {
-	tlsConn, ok := conn.(*tls.Conn)
-	if !ok {
-		return ""
+func resolveServerCertificateHash(cfg Config) (string, error) {
+	if !cfg.FrontendTLS {
+		return "", nil
 	}
 
-	state := tlsConn.ConnectionState()
-	if len(state.PeerCertificates) == 0 || state.PeerCertificates[0] == nil {
-		return ""
+	certPEM, err := os.ReadFile(cfg.FrontendCert)
+	if err != nil {
+		return "", err
 	}
 
-	sum := sha256.Sum256(state.PeerCertificates[0].Raw)
-	return hex.EncodeToString(sum[:])
+	block, _ := pem.Decode(certPEM)
+	if block == nil || block.Type != "CERTIFICATE" {
+		return "", fmt.Errorf("failed to decode certificate from %s", cfg.FrontendCert)
+	}
+
+	cert, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		return "", err
+	}
+
+	sum := sha256.Sum256(cert.Raw)
+	return hex.EncodeToString(sum[:]), nil
 }
 
 func postEPPCommand(httpClient *http.Client, backendURL, token string, payload []byte, maxResponseBytes int64) ([]byte, error) {
