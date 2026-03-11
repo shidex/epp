@@ -134,7 +134,7 @@ type authRequest struct {
 	EppUsername           string `json:"eppUsername,omitempty"`
 	EppPassword           string `json:"eppPassword,omitempty"`
 	EppNewPassword        string `json:"eppNewPassword,omitempty"`
-	ServerCertificateHash string `json:"serverCertificateHash,omitempty"`
+	ServerCertificateHash string `json:"serverCertificateHash"`
 	IPAddress             string `json:"ipAddress,omitempty"`
 }
 
@@ -484,6 +484,13 @@ func handleConn(cfg Config, logger *log.Logger, limiter *rateLimiter, tracker *c
 				logEvent(logger, cfg.LogFormat, "warn", "invalid_login_payload", map[string]any{"channel": clientID})
 				_ = client.SetWriteDeadline(time.Now().Add(cfg.WriteTimeout))
 				_ = writeEPPPayload(client, []byte(buildErrorResponse("Expected <login>")))
+				return
+			}
+
+			if strings.TrimSpace(certificateHash) == "" {
+				logEvent(logger, cfg.LogFormat, "warn", "auth_failed_missing_client_certificate_hash", map[string]any{"channel": clientID, "remote_ip": remoteAddr, "username": loginReq.ClientID})
+				_ = client.SetWriteDeadline(time.Now().Add(cfg.WriteTimeout))
+				_ = writeEPPPayload(client, []byte(buildAuthFailResponse()))
 				return
 			}
 
