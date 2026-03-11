@@ -375,6 +375,30 @@ func TestProcessAuthorizationAndCommand(t *testing.T) {
 	}
 }
 
+func TestProcessAuthorizationIncludesCertificateHashFieldWhenEmpty(t *testing.T) {
+	authSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decode auth request: %v", err)
+		}
+		v, ok := req["serverCertificateHash"]
+		if !ok {
+			t.Fatal("expected serverCertificateHash field to be present")
+		}
+		if got, ok := v.(string); !ok || got != "" {
+			t.Fatalf("unexpected serverCertificateHash value: %#v", v)
+		}
+		_, _ = w.Write([]byte(`{"responseCode":"00","eppSessionToken":"tok-1"}`))
+	}))
+	defer authSrv.Close()
+
+	httpClient := &http.Client{Timeout: time.Second}
+	token, ok := processAuthorization(httpClient, authSrv.URL, "1.1.1.1", loginXML{ClientID: "u", Password: "p"}, "", 1024)
+	if !ok || token != "tok-1" {
+		t.Fatalf("unexpected auth result ok=%v token=%q", ok, token)
+	}
+}
+
 func TestPostEPPCommandStatusAndSizeLimit(t *testing.T) {
 	statusSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad gateway", http.StatusBadGateway)

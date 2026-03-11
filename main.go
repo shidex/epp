@@ -134,7 +134,7 @@ type authRequest struct {
 	EppUsername           string `json:"eppUsername,omitempty"`
 	EppPassword           string `json:"eppPassword,omitempty"`
 	EppNewPassword        string `json:"eppNewPassword,omitempty"`
-	ServerCertificateHash string `json:"serverCertificateHash,omitempty"`
+	ServerCertificateHash string `json:"serverCertificateHash"`
 	IPAddress             string `json:"ipAddress,omitempty"`
 }
 
@@ -487,6 +487,13 @@ func handleConn(cfg Config, logger *log.Logger, limiter *rateLimiter, tracker *c
 				return
 			}
 
+			if strings.TrimSpace(certificateHash) == "" {
+				logEvent(logger, cfg.LogFormat, "warn", "auth_failed_missing_client_certificate_hash", map[string]any{"channel": clientID, "remote_ip": remoteAddr, "username": loginReq.ClientID})
+				_ = client.SetWriteDeadline(time.Now().Add(cfg.WriteTimeout))
+				_ = writeEPPPayload(client, []byte(buildAuthFailResponse()))
+				return
+			}
+
 			tok, ok := processAuthorization(httpClient, cfg.AuthBackendURL, remoteAddr, loginReq, certificateHash, cfg.BackendResponseMaxBytes)
 			if !ok {
 				logEvent(logger, cfg.LogFormat, "warn", "auth_failed", map[string]any{"channel": clientID, "remote_ip": remoteAddr, "username": loginReq.ClientID})
@@ -696,6 +703,10 @@ func resolveRegistrarCertificateHash(client net.Conn) (string, error) {
 	tlsConn, ok := client.(*tls.Conn)
 	if !ok {
 		return "", nil
+	}
+
+	if err := tlsConn.Handshake(); err != nil {
+		return "", fmt.Errorf("tls handshake failed: %w", err)
 	}
 
 	state := tlsConn.ConnectionState()
