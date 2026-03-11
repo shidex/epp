@@ -698,6 +698,10 @@ func resolveRegistrarCertificateHash(client net.Conn) (string, error) {
 		return "", nil
 	}
 
+	if err := tlsConn.Handshake(); err != nil {
+		return "", fmt.Errorf("tls handshake failed: %w", err)
+	}
+
 	state := tlsConn.ConnectionState()
 	if len(state.PeerCertificates) == 0 {
 		return "", fmt.Errorf("no registrar certificate presented by client")
