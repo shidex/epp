@@ -85,10 +85,10 @@ func TestParseTLSClientAuth(t *testing.T) {
 	if got := parseTLSClientAuth("NONE"); got != tls.NoClientCert {
 		t.Fatalf("unexpected client auth for NONE: %v", got)
 	}
-	if got := parseTLSClientAuth("OPTIONAL"); got != tls.VerifyClientCertIfGiven {
+	if got := parseTLSClientAuth("OPTIONAL"); got != tls.RequestClientCert {
 		t.Fatalf("unexpected client auth for OPTIONAL: %v", got)
 	}
-	if got := parseTLSClientAuth("REQUIRE"); got != tls.RequireAndVerifyClientCert {
+	if got := parseTLSClientAuth("REQUIRE"); got != tls.RequireAnyClientCert {
 		t.Fatalf("unexpected client auth for REQUIRE: %v", got)
 	}
 }
@@ -351,6 +351,9 @@ func TestProcessAuthorizationAndCommand(t *testing.T) {
 		if req.HashCertificate != "cert-hash" {
 			t.Fatalf("unexpected hashCertificate: %q", req.HashCertificate)
 		}
+		if req.ClientCertificate != "client-cert-pem" {
+			t.Fatalf("unexpected clientCertificate: %q", req.ClientCertificate)
+		}
 		_, _ = w.Write([]byte(`{"responseCode":"00","eppSessionToken":"tok-1"}`))
 	}))
 	defer authSrv.Close()
@@ -364,7 +367,7 @@ func TestProcessAuthorizationAndCommand(t *testing.T) {
 	defer cmdSrv.Close()
 
 	httpClient := &http.Client{Timeout: time.Second}
-	token, ok := processAuthorization(httpClient, authSrv.URL, "1.1.1.1", loginXML{ClientID: "u", Password: "p"}, "cert-hash", 1024)
+	token, ok := processAuthorization(httpClient, authSrv.URL, "1.1.1.1", loginXML{ClientID: "u", Password: "p"}, "cert-hash", "client-cert-pem", 1024)
 	if !ok || token != "tok-1" {
 		t.Fatalf("unexpected auth result ok=%v token=%q", ok, token)
 	}
@@ -403,7 +406,7 @@ func TestProcessAuthorizationIncludesCertificateHashFieldWhenEmpty(t *testing.T)
 	defer authSrv.Close()
 
 	httpClient := &http.Client{Timeout: time.Second}
-	token, ok := processAuthorization(httpClient, authSrv.URL, "1.1.1.1", loginXML{ClientID: "u", Password: "p"}, "", 1024)
+	token, ok := processAuthorization(httpClient, authSrv.URL, "1.1.1.1", loginXML{ClientID: "u", Password: "p"}, "", "", 1024)
 	if !ok || token != "tok-1" {
 		t.Fatalf("unexpected auth result ok=%v token=%q", ok, token)
 	}
