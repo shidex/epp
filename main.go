@@ -4,9 +4,11 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
 	"encoding/xml"
 	"errors"
@@ -421,6 +423,7 @@ func handleConn(cfg Config, logger *log.Logger, limiter *rateLimiter, tracker *c
 	defer client.Close()
 	clientID := client.RemoteAddr().String()
 	remoteAddr := remoteIP(client.RemoteAddr())
+	certificateHash := clientCertificateHash(client)
 	tracker.connectionOpened(remoteAddr)
 	defer tracker.connectionClosed(remoteAddr)
 
@@ -481,7 +484,7 @@ func handleConn(cfg Config, logger *log.Logger, limiter *rateLimiter, tracker *c
 				return
 			}
 
-			tok, ok := processAuthorization(httpClient, cfg.AuthBackendURL, remoteAddr, loginReq, cfg.BackendResponseMaxBytes)
+			tok, ok := processAuthorization(httpClient, cfg.AuthBackendURL, remoteAddr, loginReq, certificateHash, cfg.BackendResponseMaxBytes)
 			if !ok {
 				logEvent(logger, cfg.LogFormat, "warn", "auth_failed", map[string]any{"channel": clientID, "remote_ip": remoteAddr, "username": loginReq.ClientID})
 				_ = client.SetWriteDeadline(time.Now().Add(cfg.WriteTimeout))
@@ -643,12 +646,12 @@ func decrementKey(source map[string]int, key string) {
 	source[key]--
 }
 
-func processAuthorization(httpClient *http.Client, authURL, clientIP string, loginReq loginXML, maxResponseBytes int64) (string, bool) {
+func processAuthorization(httpClient *http.Client, authURL, clientIP string, loginReq loginXML, certificateHash string, maxResponseBytes int64) (string, bool) {
 	payload, err := json.Marshal(authRequest{
 		EppUsername:           loginReq.ClientID,
 		EppPassword:           loginReq.Password,
 		EppNewPassword:        loginReq.NewPassword,
-		ServerCertificateHash: "",
+		ServerCertificateHash: certificateHash,
 		IPAddress:             clientIP,
 	})
 	if err != nil {
@@ -684,6 +687,21 @@ func processAuthorization(httpClient *http.Client, authURL, clientIP string, log
 		return "", false
 	}
 	return parsed.EppSessionToken, true
+}
+
+func clientCertificateHash(conn net.Conn) string {
+	tlsConn, ok := conn.(*tls.Conn)
+	if !ok {
+		return ""
+	}
+
+	state := tlsConn.ConnectionState()
+	if len(state.PeerCertificates) == 0 || state.PeerCertificates[0] == nil {
+		return ""
+	}
+
+	sum := sha256.Sum256(state.PeerCertificates[0].Raw)
+	return hex.EncodeToString(sum[:])
 }
 
 func postEPPCommand(httpClient *http.Client, backendURL, token string, payload []byte, maxResponseBytes int64) ([]byte, error) {

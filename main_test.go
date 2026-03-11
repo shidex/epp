@@ -10,6 +10,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/binary"
+	"encoding/json"
 	"encoding/pem"
 	"fmt"
 	"io"
@@ -338,6 +339,13 @@ func TestProcessAuthorizationAndCommand(t *testing.T) {
 		if r.Header.Get("authentication") != "" {
 			t.Fatalf("expected empty authentication header for auth")
 		}
+		var req authRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decode auth request: %v", err)
+		}
+		if req.ServerCertificateHash != "cert-hash" {
+			t.Fatalf("unexpected certificate hash: %q", req.ServerCertificateHash)
+		}
 		_, _ = w.Write([]byte(`{"responseCode":"00","eppSessionToken":"tok-1"}`))
 	}))
 	defer authSrv.Close()
@@ -351,7 +359,7 @@ func TestProcessAuthorizationAndCommand(t *testing.T) {
 	defer cmdSrv.Close()
 
 	httpClient := &http.Client{Timeout: time.Second}
-	token, ok := processAuthorization(httpClient, authSrv.URL, "1.1.1.1", loginXML{ClientID: "u", Password: "p"}, 1024)
+	token, ok := processAuthorization(httpClient, authSrv.URL, "1.1.1.1", loginXML{ClientID: "u", Password: "p"}, "cert-hash", 1024)
 	if !ok || token != "tok-1" {
 		t.Fatalf("unexpected auth result ok=%v token=%q", ok, token)
 	}
