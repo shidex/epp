@@ -66,6 +66,54 @@ type rateLimiter struct {
 	maxKeys int
 }
 
+type connectionTracker struct {
+	mu sync.RWMutex
+
+	activeTotal  int
+	activeByIP   map[string]int
+	activeByUser map[string]int
+
+	totalRead  int
+	totalWrite int
+
+	readByIP  map[string]int
+	writeByIP map[string]int
+
+	readByUser  map[string]int
+	writeByUser map[string]int
+
+	blockedTotal  int
+	blockedByIP   map[string]int
+	blockedByUser map[string]int
+}
+
+type realtimeStats struct {
+	Connections connectionSnapshot `json:"connections"`
+	Commands    commandSnapshot    `json:"commands"`
+	Blocked     blockedSnapshot    `json:"blocked"`
+}
+
+type connectionSnapshot struct {
+	Total   int            `json:"total"`
+	PerIP   map[string]int `json:"per_ip"`
+	PerUser map[string]int `json:"per_username"`
+}
+
+type commandSnapshot struct {
+	TotalRead    int            `json:"total_read"`
+	TotalWrite   int            `json:"total_write"`
+	ReadPerIP    map[string]int `json:"read_per_ip"`
+	WritePerIP   map[string]int `json:"write_per_ip"`
+	ReadPerUser  map[string]int `json:"read_per_username"`
+	WritePerUser map[string]int `json:"write_per_username"`
+}
+
+type blockedSnapshot struct {
+	Total   int            `json:"total"`
+	PerIP   map[string]int `json:"per_ip"`
+	PerUser map[string]int `json:"per_username"`
+}
+
 type bucket struct {
 	windowStart time.Time
 	count       int
@@ -110,6 +158,7 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 	limiter := newRateLimiter(cfg)
+	tracker := newConnectionTracker()
 	httpClient := newBackendHTTPClient(cfg)
 	connSlots := make(chan struct{}, max(1, cfg.MaxConns))
 
@@ -142,7 +191,7 @@ func main() {
 		go func(client net.Conn) {
 			defer wg.Done()
 			defer func() { <-connSlots }()
-			handleConn(cfg, logger, limiter, httpClient, client)
+			handleConn(cfg, logger, limiter, tracker, httpClient, client)
 		}(conn)
 	}
 
@@ -271,10 +320,12 @@ func buildListener(cfg Config) (net.Listener, error) {
 	return tls.Listen("tcp", cfg.ListenAddr, tlsCfg)
 }
 
-func handleConn(cfg Config, logger *log.Logger, limiter *rateLimiter, httpClient *http.Client, client net.Conn) {
+func handleConn(cfg Config, logger *log.Logger, limiter *rateLimiter, tracker *connectionTracker, httpClient *http.Client, client net.Conn) {
 	defer client.Close()
 	clientID := client.RemoteAddr().String()
 	remoteAddr := remoteIP(client.RemoteAddr())
+	tracker.connectionOpened(remoteAddr)
+	defer tracker.connectionClosed(remoteAddr)
 
 	logEvent(logger, cfg.LogFormat, "info", "client_connected", map[string]any{"channel": clientID, "remote_ip": remoteAddr})
 	if err := writeEPPPayload(client, []byte(buildGreetingResponse())); err != nil {
@@ -285,7 +336,13 @@ func handleConn(cfg Config, logger *log.Logger, limiter *rateLimiter, httpClient
 	reader := bufio.NewReader(client)
 	authenticated := false
 	username := ""
+	attachedUsername := ""
 	token := ""
+	defer func() {
+		if attachedUsername != "" {
+			tracker.detachUsername(attachedUsername)
+		}
+	}()
 
 	for {
 		_ = client.SetReadDeadline(time.Now().Add(cfg.IdleTimeout))
@@ -298,13 +355,22 @@ func handleConn(cfg Config, logger *log.Logger, limiter *rateLimiter, httpClient
 		}
 
 		commandType := classifyCommandType(payload)
-		if !limiter.Allow(remoteAddr, username, clientID, commandType, cfg) {
+		allowed, blockedScope := limiter.AllowWithReason(remoteAddr, username, clientID, commandType, cfg)
+		if !allowed {
+			tracker.recordBlocked(remoteAddr, username)
 			logEvent(logger, cfg.LogFormat, "warn", "rate_limited", map[string]any{"channel": clientID, "remote_ip": remoteAddr, "username": username, "command_type": commandType})
+			if blockedScope != "" {
+				logEvent(logger, cfg.LogFormat, "warn", "rate_limit_block_scope", map[string]any{"channel": clientID, "scope": blockedScope, "remote_ip": remoteAddr, "username": username})
+			}
 			_ = client.SetWriteDeadline(time.Now().Add(cfg.WriteTimeout))
 			if err = writeEPPPayload(client, buildRateLimitExceededResponse()); err != nil {
 				logEvent(logger, cfg.LogFormat, "error", "write_rate_limit_response_failed", map[string]any{"channel": clientID, "error": err.Error()})
 			}
 			return
+		}
+
+		if commandType == "read" || commandType == "write" {
+			tracker.recordCommand(remoteAddr, username, commandType)
 		}
 
 		xmlBody := string(payload)
@@ -329,6 +395,10 @@ func handleConn(cfg Config, logger *log.Logger, limiter *rateLimiter, httpClient
 			authenticated = true
 			token = tok
 			username = loginReq.ClientID
+			if attachedUsername == "" {
+				tracker.attachUsername(username)
+				attachedUsername = username
+			}
 			logEvent(logger, cfg.LogFormat, "info", "auth_success", map[string]any{"channel": clientID, "remote_ip": remoteAddr, "username": username})
 			_ = client.SetWriteDeadline(time.Now().Add(cfg.WriteTimeout))
 			if err = writeEPPPayload(client, []byte(buildLoginResponse(loginReq.ClTRID))); err != nil {
@@ -364,6 +434,116 @@ func handleConn(cfg Config, logger *log.Logger, limiter *rateLimiter, httpClient
 			}
 		}
 	}
+}
+
+func newConnectionTracker() *connectionTracker {
+	return &connectionTracker{
+		activeByIP:    make(map[string]int),
+		activeByUser:  make(map[string]int),
+		readByIP:      make(map[string]int),
+		writeByIP:     make(map[string]int),
+		readByUser:    make(map[string]int),
+		writeByUser:   make(map[string]int),
+		blockedByIP:   make(map[string]int),
+		blockedByUser: make(map[string]int),
+	}
+}
+
+func (t *connectionTracker) connectionOpened(ip string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.activeTotal++
+	t.activeByIP[ip]++
+}
+
+func (t *connectionTracker) attachUsername(username string) {
+	if strings.TrimSpace(username) == "" {
+		return
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.activeByUser[username]++
+}
+
+func (t *connectionTracker) detachUsername(username string) {
+	if strings.TrimSpace(username) == "" {
+		return
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	decrementKey(t.activeByUser, username)
+}
+
+func (t *connectionTracker) connectionClosed(ip string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.activeTotal > 0 {
+		t.activeTotal--
+	}
+	decrementKey(t.activeByIP, ip)
+}
+
+func (t *connectionTracker) recordCommand(ip, username, commandType string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	switch commandType {
+	case "read":
+		t.totalRead++
+		t.readByIP[ip]++
+		if username != "" {
+			t.readByUser[username]++
+		}
+	case "write":
+		t.totalWrite++
+		t.writeByIP[ip]++
+		if username != "" {
+			t.writeByUser[username]++
+		}
+	}
+}
+
+func (t *connectionTracker) recordBlocked(ip, username string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.blockedTotal++
+	t.blockedByIP[ip]++
+	if username != "" {
+		t.blockedByUser[username]++
+	}
+}
+
+func (t *connectionTracker) snapshot() realtimeStats {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+
+	return realtimeStats{
+		Connections: connectionSnapshot{Total: t.activeTotal, PerIP: cloneMap(t.activeByIP), PerUser: cloneMap(t.activeByUser)},
+		Commands:    commandSnapshot{TotalRead: t.totalRead, TotalWrite: t.totalWrite, ReadPerIP: cloneMap(t.readByIP), WritePerIP: cloneMap(t.writeByIP), ReadPerUser: cloneMap(t.readByUser), WritePerUser: cloneMap(t.writeByUser)},
+		Blocked:     blockedSnapshot{Total: t.blockedTotal, PerIP: cloneMap(t.blockedByIP), PerUser: cloneMap(t.blockedByUser)},
+	}
+}
+
+func getInternalRealtimeStats(tracker *connectionTracker) realtimeStats {
+	if tracker == nil {
+		return realtimeStats{}
+	}
+	return tracker.snapshot()
+}
+
+func cloneMap(src map[string]int) map[string]int {
+	dst := make(map[string]int, len(src))
+	for k, v := range src {
+		dst[k] = v
+	}
+	return dst
+}
+
+func decrementKey(source map[string]int, key string) {
+	if source[key] <= 1 {
+		delete(source, key)
+		return
+	}
+	source[key]--
 }
 
 func processAuthorization(httpClient *http.Client, authURL, clientIP string, loginReq loginXML, maxResponseBytes int64) (string, bool) {
@@ -474,46 +654,51 @@ func newRateLimiter(cfg Config) *rateLimiter {
 }
 
 func (r *rateLimiter) Allow(ip, username, channelID, commandType string, cfg Config) bool {
+	allowed, _ := r.AllowWithReason(ip, username, channelID, commandType, cfg)
+	return allowed
+}
+
+func (r *rateLimiter) AllowWithReason(ip, username, channelID, commandType string, cfg Config) (bool, string) {
 	now := time.Now()
 
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
 	if !r.allowForScope("ip", ip, cfg.IPRateLimitRules, now) {
-		return false
+		return false, "ip"
 	}
 	if username != "" && !r.allowForScope("client", username, cfg.ClientRateLimit, now) {
-		return false
+		return false, "client"
 	}
 	if !r.allowForScope("channel", channelID, cfg.ChannelRateLimit, now) {
-		return false
+		return false, "channel"
 	}
 
 	switch commandType {
 	case "write":
 		if !r.allowForScope("write", scopedKey("ip", ip), cfg.WriteIPRateLimit, now) {
-			return false
+			return false, "write-ip"
 		}
 		if username != "" && !r.allowForScope("write", scopedKey("client", username), cfg.WriteClientLimit, now) {
-			return false
+			return false, "write-client"
 		}
 		if !r.allowForScope("write-legacy", scopedKey("ip", fallbackKey(username, ip)), cfg.WriteRateLimit, now) {
-			return false
+			return false, "write-legacy"
 		}
-		return true
+		return true, ""
 	case "read":
 		if !r.allowForScope("read", scopedKey("ip", ip), cfg.ReadIPRateLimit, now) {
-			return false
+			return false, "read-ip"
 		}
 		if username != "" && !r.allowForScope("read", scopedKey("client", username), cfg.ReadClientLimit, now) {
-			return false
+			return false, "read-client"
 		}
 		if !r.allowForScope("read-legacy", scopedKey("ip", fallbackKey(username, ip)), cfg.ReadRateLimit, now) {
-			return false
+			return false, "read-legacy"
 		}
-		return true
+		return true, ""
 	default:
-		return true
+		return true, ""
 	}
 }
 

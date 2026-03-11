@@ -166,3 +166,48 @@ Penjelasan singkat:
 - Set `EPP_MAX_CONNS` sesuai kapasitas CPU/RAM host.
 - Untuk target throughput tinggi, aktifkan keep-alive backend dan tuning pool koneksi (`EPP_BACKEND_MAX_IDLE_CONNS*`) agar tidak terjadi bottleneck saat burst request.
 - Pastikan firewall/L4 LB juga punya proteksi SYN flood dan connection limit per source IP.
+
+## Internal realtime stats (cara menggunakan)
+
+Fitur ini **internal only** (tidak membuka endpoint HTTP publik). Data yang disimpan:
+- koneksi aktif: total, per IP, per username,
+- command: total read/write, read/write per IP, read/write per username,
+- blocked (rate limit): total, per IP, per username.
+
+Untuk mengambil snapshot realtime, panggil fungsi internal berikut dari kode Go di proses yang sama:
+
+```go
+stats := getInternalRealtimeStats(tracker)
+```
+
+`tracker` adalah instance `connectionTracker` yang sudah dibuat di `main` (`tracker := newConnectionTracker()`) dan dipakai di `handleConn`.
+
+Contoh bentuk data snapshot (JSON):
+
+```json
+{
+  "connections": {
+    "total": 12,
+    "per_ip": {"10.10.10.1": 3},
+    "per_username": {"registrarA": 2}
+  },
+  "commands": {
+    "total_read": 1200,
+    "total_write": 320,
+    "read_per_ip": {"10.10.10.1": 500},
+    "write_per_ip": {"10.10.10.1": 80},
+    "read_per_username": {"registrarA": 250},
+    "write_per_username": {"registrarA": 40}
+  },
+  "blocked": {
+    "total": 15,
+    "per_ip": {"10.10.10.9": 12},
+    "per_username": {"registrarB": 4}
+  }
+}
+```
+
+Rekomendasi pemakaian:
+- panggil berkala dari job internal (misalnya ticker per 5-10 detik),
+- kirim ke log/observability internal,
+- jangan expose langsung ke jaringan publik.
