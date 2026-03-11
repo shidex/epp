@@ -180,6 +180,54 @@ func TestRateLimiterMaxKeys(t *testing.T) {
 	}
 }
 
+func TestRateLimiterAllowWithReason(t *testing.T) {
+	limiter := newRateLimiter(Config{})
+	cfg := Config{IPRateLimitRules: []rateLimitRule{{limit: 1, window: time.Second}}}
+
+	if ok, reason := limiter.AllowWithReason("1.1.1.1", "", "chan-1", "read", cfg); !ok || reason != "" {
+		t.Fatalf("first call should pass, got ok=%v reason=%q", ok, reason)
+	}
+	if ok, reason := limiter.AllowWithReason("1.1.1.1", "", "chan-1", "read", cfg); ok || reason != "ip" {
+		t.Fatalf("second call should fail on ip scope, got ok=%v reason=%q", ok, reason)
+	}
+}
+
+func TestConnectionTrackerSnapshot(t *testing.T) {
+	tracker := newConnectionTracker()
+	tracker.connectionOpened("1.1.1.1")
+	tracker.attachUsername("user-a")
+	tracker.recordCommand("1.1.1.1", "user-a", "read")
+	tracker.recordCommand("1.1.1.1", "user-a", "write")
+	tracker.recordBlocked("1.1.1.1", "user-a")
+
+	s := getInternalRealtimeStats(tracker)
+	if s.Connections.Total != 1 {
+		t.Fatalf("expected active total 1 got %d", s.Connections.Total)
+	}
+	if s.Connections.PerIP["1.1.1.1"] != 1 || s.Connections.PerUser["user-a"] != 1 {
+		t.Fatalf("unexpected active snapshots: %+v", s.Connections)
+	}
+	if s.Commands.TotalRead != 1 || s.Commands.TotalWrite != 1 {
+		t.Fatalf("unexpected command totals: %+v", s.Commands)
+	}
+	if s.Blocked.Total != 1 || s.Blocked.PerIP["1.1.1.1"] != 1 || s.Blocked.PerUser["user-a"] != 1 {
+		t.Fatalf("unexpected blocked stats: %+v", s.Blocked)
+	}
+
+	tracker.detachUsername("user-a")
+	tracker.connectionClosed("1.1.1.1")
+	s = getInternalRealtimeStats(tracker)
+	if s.Connections.Total != 0 {
+		t.Fatalf("expected active total 0 got %d", s.Connections.Total)
+	}
+	if _, ok := s.Connections.PerIP["1.1.1.1"]; ok {
+		t.Fatalf("expected ip key deleted: %+v", s.Connections.PerIP)
+	}
+	if _, ok := s.Connections.PerUser["user-a"]; ok {
+		t.Fatalf("expected user key deleted: %+v", s.Connections.PerUser)
+	}
+}
+
 func TestLogEventJSON(t *testing.T) {
 	buf := &bytes.Buffer{}
 	logger := log.New(buf, "", 0)
