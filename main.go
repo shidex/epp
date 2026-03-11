@@ -138,7 +138,7 @@ type authRequest struct {
 	ServerCertificateHash string `json:"serverCertificateHash"`
 	HashCertificate       string `json:"hashCertificate"`
 	ClientCertificate     string `json:"clientCertificate"`
-	IPAddress             string `json:"ipAddress,omitempty"`
+	IPAddress             string `json:"ipAddress"`
 }
 
 type authResponse struct {

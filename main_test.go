@@ -366,8 +366,17 @@ func TestProcessAuthorizationAndCommand(t *testing.T) {
 		if req.HashCertificate != "cert-hash" {
 			t.Fatalf("unexpected hashCertificate: %q", req.HashCertificate)
 		}
+		if req.EppUsername != "u" {
+			t.Fatalf("unexpected eppUsername: %q", req.EppUsername)
+		}
+		if req.EppPassword != "p" {
+			t.Fatalf("unexpected eppPassword: %q", req.EppPassword)
+		}
 		if req.ClientCertificate != "client-cert-pem" {
 			t.Fatalf("unexpected clientCertificate: %q", req.ClientCertificate)
+		}
+		if req.IPAddress != "1.1.1.1" {
+			t.Fatalf("unexpected ipAddress: %q", req.IPAddress)
 		}
 		_, _ = w.Write([]byte(`{"responseCode":"00","eppSessionToken":"tok-1"}`))
 	}))
@@ -422,6 +431,13 @@ func TestProcessAuthorizationIncludesCertificateHashFieldWhenEmpty(t *testing.T)
 		}
 		if got, ok := cert.(string); !ok || got != "" {
 			t.Fatalf("unexpected clientCertificate value: %#v", cert)
+		}
+		ip, ok := req["ipAddress"]
+		if !ok {
+			t.Fatal("expected ipAddress field to be present")
+		}
+		if got, ok := ip.(string); !ok || got != "1.1.1.1" {
+			t.Fatalf("unexpected ipAddress value: %#v", ip)
 		}
 		_, _ = w.Write([]byte(`{"responseCode":"00","eppSessionToken":"tok-1"}`))
 	}))
