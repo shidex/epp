@@ -321,6 +321,33 @@ func TestClassifyCommandType(t *testing.T) {
 	}
 }
 
+func TestResolveCommandBackendURL(t *testing.T) {
+	cfg := Config{
+		CommandBackendURL: "http://default-backend",
+		ReadBackendURL:    "http://read-backend",
+		WriteBackendURL:   "http://write-backend",
+	}
+
+	if got := resolveCommandBackendURL(cfg, "read"); got != "http://read-backend" {
+		t.Fatalf("expected read backend, got %q", got)
+	}
+	if got := resolveCommandBackendURL(cfg, "write"); got != "http://write-backend" {
+		t.Fatalf("expected write backend, got %q", got)
+	}
+	if got := resolveCommandBackendURL(cfg, "unknown"); got != "http://default-backend" {
+		t.Fatalf("expected default backend for unknown command type, got %q", got)
+	}
+
+	cfg.ReadBackendURL = ""
+	cfg.WriteBackendURL = ""
+	if got := resolveCommandBackendURL(cfg, "read"); got != "http://default-backend" {
+		t.Fatalf("expected default backend fallback for read, got %q", got)
+	}
+	if got := resolveCommandBackendURL(cfg, "write"); got != "http://default-backend" {
+		t.Fatalf("expected default backend fallback for write, got %q", got)
+	}
+}
+
 func TestBuildDomainReadCacheKey(t *testing.T) {
 	tests := []struct {
 		name    string
