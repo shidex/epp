@@ -5,7 +5,7 @@ Service Go ini membuka **port TCP EPP** (default `:700`), menerima frame EPP dar
 ## Fitur penting
 - Parsing frame EPP RFC5734 dengan validasi panjang frame (`EPP_MAX_FRAME_BYTES`).
 - TLS frontend opsional + mTLS (`TLS_CLIENT_AUTH=REQUIRE|OPTIONAL|NONE`).
-- Auth login registrar ke backend auth, lalu command forward ke backend command.
+- Auth login registrar ke backend auth, lalu command forward ke backend command (bisa dipisah backend read/write).
 - Mitigasi flood / DDoS berbasis rate limit multi-dimensi:
   - per IP,
   - per client/username,
@@ -25,6 +25,8 @@ Contoh tersedia di `env.example`.
 - `server.ssl.enabled` -> `SERVER_SSL_ENABLED`
 - `authbackend.url` -> `AUTHBACKEND_URL`
 - `backend.url` -> `BACKEND_URL`
+- `backend.read.url` -> `BACKEND_READ_URL` (opsional, fallback ke `BACKEND_URL`)
+- `backend.write.url` -> `BACKEND_WRITE_URL` (opsional, fallback ke `BACKEND_URL`)
 - `logoutbackend.url` -> `LOGOUTBACKEND_URL`
 - `idle.timeout.seconds` -> `IDLE_TIMEOUT_SECONDS`
 - `tls.client.auth` -> `TLS_CLIENT_AUTH` (`NONE`/`OPTIONAL`/`REQUIRE`)
@@ -38,6 +40,12 @@ Contoh tersedia di `env.example`.
 - `ratelimit.read.client.rules` -> `RATELIMIT_READ_CLIENT_RULES`
 - `ratelimit.write.client.rules` -> `RATELIMIT_WRITE_CLIENT_RULES`
 
+
+### Routing backend command read/write
+- `BACKEND_READ_URL` dipakai **hanya** untuk command object `domain`, `host`, `contact` dengan operasi read (`check`, `info`).
+- `BACKEND_WRITE_URL` dipakai **hanya** untuk command object `domain`, `host`, `contact` dengan operasi write (`create`, `update`, `renew`, `delete`, `transfer`).
+- Command lain yang belum didefinisikan (contoh: `login`, `logout`, `poll`, extension command lain) akan tetap ke `BACKEND_URL` (default backend).
+- Jika salah satu env read/write tidak diisi, proxy fallback ke `BACKEND_URL` agar tetap backward compatible.
 
 ### Penjelasan fungsi setiap setting rate limit
 
