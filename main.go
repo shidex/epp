@@ -66,6 +66,7 @@ type Config struct {
 	RealtimeStatsFile          string
 	RealtimeStatsInterval      time.Duration
 	RealtimeStatsWriteTimeout  time.Duration
+	DomainReadCacheTTL         time.Duration
 }
 
 type rateLimiter struct {
@@ -181,7 +182,7 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 	limiter := newRateLimiter(cfg)
-	domainCache := newCommandCache(30 * time.Second)
+	domainCache := newCommandCache(cfg.DomainReadCacheTTL)
 	tracker := newConnectionTracker()
 	httpClient := newBackendHTTPClient(cfg)
 	connSlots := make(chan struct{}, max(1, cfg.MaxConns))
@@ -265,6 +266,7 @@ func loadConfig() Config {
 	realtimeStatsFile := flag.String("realtime-stats-file", envOr("EPP_REALTIME_STATS_FILE", "logs/realtime-stats.json"), "path to realtime stats json file")
 	realtimeStatsInterval := flag.Duration("realtime-stats-interval", durationWithFallback(envOr("EPP_REALTIME_STATS_INTERVAL", "5s"), 5*time.Second), "refresh interval for realtime stats json file")
 	realtimeStatsWriteTimeout := flag.Duration("realtime-stats-write-timeout", durationWithFallback(envOr("EPP_REALTIME_STATS_WRITE_TIMEOUT", "1s"), time.Second), "max duration for each realtime stats file write before skipping")
+	domainReadCacheTTL := flag.Duration("domain-read-cache-ttl", durationWithFallback(envOr("EPP_DOMAIN_READ_CACHE_TTL", "30s"), 30*time.Second), "ttl for cached domain read command responses")
 	flag.Parse()
 
 	return Config{
@@ -303,6 +305,7 @@ func loadConfig() Config {
 		RealtimeStatsFile:          *realtimeStatsFile,
 		RealtimeStatsInterval:      *realtimeStatsInterval,
 		RealtimeStatsWriteTimeout:  *realtimeStatsWriteTimeout,
+		DomainReadCacheTTL:         *domainReadCacheTTL,
 	}
 }
 
