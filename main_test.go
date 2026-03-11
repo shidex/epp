@@ -347,6 +347,42 @@ func TestBuildDomainReadCacheKey(t *testing.T) {
 	}
 }
 
+func TestCommandCacheGetOrReserveCoalescesConcurrentMisses(t *testing.T) {
+	cache := newCommandCache(time.Second)
+
+	_, hit, waitCh, reserved := cache.GetOrReserve("check:example.id")
+	if hit || waitCh != nil || !reserved {
+		t.Fatalf("first call should reserve backend fetch, got hit=%v waitChNil=%v reserved=%v", hit, waitCh == nil, reserved)
+	}
+
+	_, hit, waitCh, reserved = cache.GetOrReserve("check:example.id")
+	if hit || waitCh == nil || reserved {
+		t.Fatalf("second call should wait for inflight fetch, got hit=%v waitChNil=%v reserved=%v", hit, waitCh == nil, reserved)
+	}
+
+	done := make(chan struct{})
+	go func() {
+		<-waitCh
+		close(done)
+	}()
+
+	cache.CompleteReservation("check:example.id", []byte("from-backend"))
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("waiter channel was not released")
+	}
+
+	got, ok := cache.Get("check:example.id")
+	if !ok {
+		t.Fatal("expected cache hit after reservation completion")
+	}
+	if string(got) != "from-backend" {
+		t.Fatalf("unexpected cached body after completion: %q", string(got))
+	}
+}
+
 func TestCommandCacheSetAndExpiry(t *testing.T) {
 	cache := newCommandCache(30 * time.Millisecond)
 	cache.Set("check:example.id", []byte("cached-response"))
