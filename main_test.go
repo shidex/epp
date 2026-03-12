@@ -412,29 +412,29 @@ func TestParseLoginXML(t *testing.T) {
 	}
 }
 
-func TestParseLoginXMLWithCDATAEnvelope(t *testing.T) {
-	xmlPayload := []byte(`<![CDATA[<?xml version="1.0" encoding="UTF-8"?><epp xmlns="urn:ietf:params:xml:ns:epp-1.0"><command><login><clID>registrar1</clID><pw>pw1</pw><newPW>pw2</newPW></login><clTRID>abc</clTRID></command></epp>]]>`)
+func TestParseLoginXMLWithCDATAVariables(t *testing.T) {
+	xmlPayload := []byte(`<?xml version="1.0" encoding="UTF-8"?><epp xmlns="urn:ietf:params:xml:ns:epp-1.0"><command><login><clID><![CDATA[registrar1]]></clID><pw><![CDATA[pw1]]></pw><newPW><![CDATA[pw2]]></newPW></login><clTRID><![CDATA[abc]]></clTRID></command></epp>`)
 	got, err := parseLoginXML(xmlPayload)
 	if err != nil {
-		t.Fatalf("parse login failed for cdata payload: %v", err)
+		t.Fatalf("parse login failed for cdata variables: %v", err)
 	}
 	if got.ClientID != "registrar1" || got.Password != "pw1" || got.NewPassword != "pw2" || got.ClTRID != "abc" {
-		t.Fatalf("unexpected parsed login for cdata payload: %+v", got)
+		t.Fatalf("unexpected parsed login for cdata variables: %+v", got)
 	}
 }
 
-func TestClassifyCommandTypeWithCDATA(t *testing.T) {
-	xmlPayload := []byte(`<![CDATA[<epp><command><create><domain:create/></create></command></epp>]]>`)
+func TestClassifyCommandTypeWithCDATAVariables(t *testing.T) {
+	xmlPayload := []byte(`<epp><command><create><domain:create><domain:name><![CDATA[example.id]]></domain:name></domain:create></create></command></epp>`)
 	if got := classifyCommandType(xmlPayload); got != "write" {
 		t.Fatalf("expected write for cdata payload got %q", got)
 	}
 }
 
-func TestBuildDomainReadCacheKeyWithCDATA(t *testing.T) {
-	xmlPayload := []byte(`<![CDATA[<epp><command><check><domain:check><domain:name>Example.ID</domain:name></domain:check></check></command></epp>]]>`)
+func TestBuildDomainReadCacheKeyWithCDATAVariables(t *testing.T) {
+	xmlPayload := []byte(`<epp><command><check><domain:check><domain:name><![CDATA[Example.ID]]></domain:name></domain:check></check></command></epp>`)
 	gotKey, gotOK := buildDomainReadCacheKey(xmlPayload)
 	if !gotOK {
-		t.Fatal("expected cache key for cdata-wrapped domain check")
+		t.Fatal("expected cache key for domain check with cdata variable")
 	}
 	if gotKey != "check:example.id" {
 		t.Fatalf("expected key check:example.id got %q", gotKey)
