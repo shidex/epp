@@ -169,6 +169,7 @@ type loginXML struct {
 }
 
 var domainNamePattern = regexp.MustCompile(`(?is)<domain:name(?:\s+[^>]*)?>([^<]+)</domain:name>`)
+var responseClTRIDPattern = regexp.MustCompile(`(?is)(<cltrid(?:\s+[^>]*)?>)(.*?)(</cltrid>)`)
 
 func main() {
 	cfg := loadConfig()
@@ -580,6 +581,7 @@ func handleConn(cfg Config, logger *log.Logger, limiter *rateLimiter, domainCach
 			if cacheable {
 				cachedBody, hit, waitCh, reserved := domainCache.GetOrReserve(cacheKey)
 				if hit {
+					cachedBody = withClientTransactionID(cachedBody, payload)
 					_ = client.SetWriteDeadline(time.Now().Add(cfg.WriteTimeout))
 					if err = writeEPPPayload(client, cachedBody); err != nil {
 						logEvent(logger, cfg.LogFormat, "error", "write_cached_command_response_failed", map[string]any{"channel": clientID, "error": err.Error()})
@@ -592,6 +594,7 @@ func handleConn(cfg Config, logger *log.Logger, limiter *rateLimiter, domainCach
 				if waitCh != nil {
 					<-waitCh
 					if cachedAfterWait, ok := domainCache.Get(cacheKey); ok {
+						cachedAfterWait = withClientTransactionID(cachedAfterWait, payload)
 						_ = client.SetWriteDeadline(time.Now().Add(cfg.WriteTimeout))
 						if err = writeEPPPayload(client, cachedAfterWait); err != nil {
 							logEvent(logger, cfg.LogFormat, "error", "write_cached_command_response_failed", map[string]any{"channel": clientID, "error": err.Error()})
@@ -1020,6 +1023,24 @@ func extractClTRID(payload []byte) string {
 		return ""
 	}
 	return msg.ClTRID
+}
+
+func withClientTransactionID(response []byte, requestPayload []byte) []byte {
+	clTRID := extractClTRID(requestPayload)
+	if clTRID == "" {
+		return append([]byte(nil), response...)
+	}
+
+	indices := responseClTRIDPattern.FindSubmatchIndex(response)
+	if len(indices) == 0 {
+		return append([]byte(nil), response...)
+	}
+
+	updated := make([]byte, 0, len(response)+len(clTRID))
+	updated = append(updated, response[:indices[4]]...)
+	updated = append(updated, []byte(escapeXML(clTRID))...)
+	updated = append(updated, response[indices[5]:]...)
+	return updated
 }
 
 func newRateLimiter(cfg Config) *rateLimiter {
