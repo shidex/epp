@@ -170,6 +170,7 @@ type loginXML struct {
 
 var domainNamePattern = regexp.MustCompile(`(?is)<domain:name(?:\s+[^>]*)?>([^<]+)</domain:name>`)
 var responseClTRIDPattern = regexp.MustCompile(`(?is)(<cltrid(?:\s+[^>]*)?>)(.*?)(</cltrid>)`)
+var cdataPattern = regexp.MustCompile(`(?is)<!\[CDATA\[(.*?)\]\]>`)
 
 func main() {
 	cfg := loadConfig()
@@ -514,7 +515,7 @@ func handleConn(cfg Config, logger *log.Logger, limiter *rateLimiter, domainCach
 			tracker.recordCommand(remoteAddr, username, commandType)
 		}
 
-		xmlBody := string(payload)
+		xmlBody := strings.ToLower(inspectXMLPayload(payload))
 		switch {
 		case !authenticated:
 			loginReq, parseErr := parseLoginXML(payload)
@@ -725,12 +726,12 @@ func (c *commandCache) CompleteReservation(key string, response []byte) {
 }
 
 func buildDomainReadCacheKey(payload []byte) (string, bool) {
-	xmlBody := strings.ToLower(string(payload))
+	xmlBody := strings.ToLower(inspectXMLPayload(payload))
 	if !strings.Contains(xmlBody, "<domain:check") && !strings.Contains(xmlBody, "<domain:info") {
 		return "", false
 	}
 
-	domainName := extractDomainName(payload)
+	domainName := extractDomainName([]byte(xmlBody))
 	if domainName == "" {
 		return "", false
 	}
@@ -1006,7 +1007,7 @@ func readBodyWithLimit(body io.Reader, maxBytes int64) ([]byte, error) {
 
 func parseLoginXML(payload []byte) (loginXML, error) {
 	var msg loginXML
-	decoder := xml.NewDecoder(bytes.NewReader(payload))
+	decoder := xml.NewDecoder(bytes.NewReader([]byte(inspectXMLPayload(payload))))
 	if err := decoder.Decode(&msg); err != nil {
 		return loginXML{}, err
 	}
@@ -1101,7 +1102,7 @@ func (r *rateLimiter) AllowWithReason(ip, username, channelID, commandType strin
 }
 
 func classifyCommandType(payload []byte) string {
-	xmlBody := strings.ToLower(string(payload))
+	xmlBody := strings.ToLower(inspectXMLPayload(payload))
 
 	if strings.Contains(xmlBody, "<login") || strings.Contains(xmlBody, "<logout") {
 		return "read"
@@ -1125,6 +1126,20 @@ func classifyCommandType(payload []byte) string {
 	}
 
 	return ""
+}
+
+func inspectXMLPayload(payload []byte) string {
+	xmlBody := string(payload)
+	if !strings.Contains(xmlBody, "<![CDATA[") {
+		return xmlBody
+	}
+
+	parsed := cdataPattern.ReplaceAllString(xmlBody, "$1")
+	if strings.TrimSpace(parsed) == "" {
+		return xmlBody
+	}
+
+	return parsed
 }
 
 func fallbackKey(username, ip string) string {
