@@ -412,6 +412,35 @@ func TestParseLoginXML(t *testing.T) {
 	}
 }
 
+func TestParseLoginXMLWithCDATAEnvelope(t *testing.T) {
+	xmlPayload := []byte(`<![CDATA[<?xml version="1.0" encoding="UTF-8"?><epp xmlns="urn:ietf:params:xml:ns:epp-1.0"><command><login><clID>registrar1</clID><pw>pw1</pw><newPW>pw2</newPW></login><clTRID>abc</clTRID></command></epp>]]>`)
+	got, err := parseLoginXML(xmlPayload)
+	if err != nil {
+		t.Fatalf("parse login failed for cdata payload: %v", err)
+	}
+	if got.ClientID != "registrar1" || got.Password != "pw1" || got.NewPassword != "pw2" || got.ClTRID != "abc" {
+		t.Fatalf("unexpected parsed login for cdata payload: %+v", got)
+	}
+}
+
+func TestClassifyCommandTypeWithCDATA(t *testing.T) {
+	xmlPayload := []byte(`<![CDATA[<epp><command><create><domain:create/></create></command></epp>]]>`)
+	if got := classifyCommandType(xmlPayload); got != "write" {
+		t.Fatalf("expected write for cdata payload got %q", got)
+	}
+}
+
+func TestBuildDomainReadCacheKeyWithCDATA(t *testing.T) {
+	xmlPayload := []byte(`<![CDATA[<epp><command><check><domain:check><domain:name>Example.ID</domain:name></domain:check></check></command></epp>]]>`)
+	gotKey, gotOK := buildDomainReadCacheKey(xmlPayload)
+	if !gotOK {
+		t.Fatal("expected cache key for cdata-wrapped domain check")
+	}
+	if gotKey != "check:example.id" {
+		t.Fatalf("expected key check:example.id got %q", gotKey)
+	}
+}
+
 func TestBuildRateLimitExceededResponse(t *testing.T) {
 	resp := string(buildRateLimitExceededResponse())
 	if !bytes.Contains([]byte(resp), []byte(`code="2400"`)) {
