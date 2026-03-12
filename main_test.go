@@ -1185,3 +1185,23 @@ func TestBuildListenerTLSWithFullChainCertificate(t *testing.T) {
 		t.Fatalf("accept failed: %v", acceptErr)
 	}
 }
+
+func TestNormalizeXMLPayloadSchemaLocationHeader(t *testing.T) {
+	in := []byte(`<epp xmlns="urn:ietf:params:xml:ns:epp-1.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xsi:schemaLocation="urn:ietf:params:xml:ns:epp-1.0 epp-1.0.xsd"></epp>`)
+	out := normalizeXMLPayload(in)
+
+	if strings.Contains(string(out), "xmlns:xsi:schemaLocation=") {
+		t.Fatal("expected invalid xmlns:xsi:schemaLocation to be normalized")
+	}
+	if !strings.Contains(string(out), "xsi:schemaLocation=") {
+		t.Fatal("expected xsi:schemaLocation attribute to exist after normalization")
+	}
+}
+
+func TestNormalizeXMLPayloadNoSchemaLocationHeader(t *testing.T) {
+	in := []byte(`<epp xmlns="urn:ietf:params:xml:ns:epp-1.0"></epp>`)
+	out := normalizeXMLPayload(in)
+	if string(out) != string(in) {
+		t.Fatal("expected payload without invalid namespace header to stay unchanged")
+	}
+}

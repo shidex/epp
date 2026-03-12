@@ -495,6 +495,8 @@ func handleConn(cfg Config, logger *log.Logger, limiter *rateLimiter, domainCach
 			return
 		}
 
+		payload = normalizeXMLPayload(payload)
+
 		commandType := classifyCommandType(payload)
 		allowed, blockedScope := limiter.AllowWithReason(remoteAddr, username, clientID, commandType, cfg)
 		if !allowed {
@@ -1130,6 +1132,13 @@ func classifyCommandType(payload []byte) string {
 	}
 
 	return ""
+}
+
+func normalizeXMLPayload(payload []byte) []byte {
+	if !bytes.Contains(payload, []byte("xmlns:xsi:schemaLocation=")) {
+		return payload
+	}
+	return bytes.ReplaceAll(payload, []byte("xmlns:xsi:schemaLocation="), []byte("xsi:schemaLocation="))
 }
 
 func inspectXMLPayload(payload []byte) string {
