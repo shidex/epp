@@ -470,7 +470,7 @@ func TestHandleConnDomainReadCacheHitSkipsBackend(t *testing.T) {
 	}))
 	defer authSrv.Close()
 
-	cmdResponse := []byte(`<epp><response><result code="1000"><msg>cached-domain-check</msg></result></response></epp>`)
+	cmdResponse := []byte(`<epp><response><result code="1000"><msg>cached-domain-check</msg></result><trID><clTRID>abc</clTRID><svTRID>backend</svTRID></trID></response></epp>`)
 	cmdSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		commandCalls.Add(1)
 		_, _ = w.Write(cmdResponse)
@@ -528,15 +528,19 @@ func TestHandleConnDomainReadCacheHitSkipsBackend(t *testing.T) {
 		t.Fatalf("unexpected first domain check response: %s", string(firstResp))
 	}
 
-	if err := writeEPPPayload(clientConn, domainCheck); err != nil {
+	domainCheckSecond := []byte(`<epp><command><check><domain:check><domain:name>example.id</domain:name></domain:check></check><clTRID>xyz</clTRID></command></epp>`)
+	if err := writeEPPPayload(clientConn, domainCheckSecond); err != nil {
 		t.Fatalf("write second domain check failed: %v", err)
 	}
 	secondResp, err := readEPPPayload(reader, cfg.MaxFrameSize)
 	if err != nil {
 		t.Fatalf("read second domain check response failed: %v", err)
 	}
-	if !bytes.Equal(secondResp, cmdResponse) {
-		t.Fatalf("unexpected second domain check response: %s", string(secondResp))
+	if bytes.Equal(secondResp, cmdResponse) {
+		t.Fatalf("expected cached response clTRID to be rewritten for client request: %s", string(secondResp))
+	}
+	if !bytes.Contains(secondResp, []byte(`<clTRID>xyz</clTRID>`)) {
+		t.Fatalf("expected rewritten clTRID in cached response, got: %s", string(secondResp))
 	}
 
 	if got := commandCalls.Load(); got != 1 {
